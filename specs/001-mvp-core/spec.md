@@ -5,7 +5,7 @@
 **Status**: Draft  
 **Input**: User description: "Sluice: Comprehensive Architectural Specification and MVP Implementation Plan"
 
-## User Scenarios & Testing *(mandatory)*
+## User Scenarios & Testing _(mandatory)_
 
 ### User Story 1 - Publish a Message with Durability Guarantee (Priority: P1)
 
@@ -111,7 +111,7 @@ An operator needs visibility into broker performance, including publish latency,
 - What happens when a consumer disconnects mid-stream? → Server cleans up subscription handle, cursor remains at last ACK.
 - What happens when a new consumer joins an already-active consumer group? → Seamless takeover: prior connection terminated, new consumer inherits cursor and starts fresh with 0 credits.
 
-## Requirements *(mandatory)*
+## Requirements _(mandatory)_
 
 ### Functional Requirements
 
@@ -143,7 +143,7 @@ An operator needs visibility into broker performance, including publish latency,
 
 - **Credit Balance**: Runtime state (not persisted) tracking how many messages a subscription stream can receive. Updated by `CreditGrant`, decremented on delivery.
 
-## Success Criteria *(mandatory)*
+## Success Criteria _(mandatory)_
 
 ### Measurable Outcomes
 
