@@ -13,7 +13,10 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
 use super::batch::{BatchAccumulator, BatchConfig};
-use super::schema::{apply_pragmas, initialize_schema, insert_message, insert_or_get_topic};
+use super::schema::{
+    apply_pragmas, get_or_create_subscription, initialize_schema, insert_message,
+    insert_or_get_topic, update_cursor, Subscription,
+};
 use crate::flow::notify::NotificationBus;
 use crate::now_millis;
 
@@ -47,6 +50,21 @@ pub struct PublishCommand {
     pub reply: oneshot::Sender<Result<PublishResult, WriterError>>,
 }
 
+/// Command to get or create a subscription.
+pub struct SubscriptionCommand {
+    pub topic_id: i64,
+    pub consumer_group: String,
+    pub reply: oneshot::Sender<Result<Subscription, WriterError>>,
+}
+
+/// Command to update a cursor position.
+pub struct CursorUpdateCommand {
+    pub topic_id: i64,
+    pub consumer_group: String,
+    pub cursor_seq: i64,
+    pub reply: oneshot::Sender<Result<(), WriterError>>,
+}
+
 /// Handle to the writer thread.
 ///
 /// Provides async interface to submit write operations.
@@ -57,6 +75,8 @@ pub struct WriterHandle {
 
 enum WriterMessage {
     Publish(PublishCommand),
+    GetOrCreateSubscription(SubscriptionCommand),
+    UpdateCursor(CursorUpdateCommand),
     Shutdown,
 }
 
@@ -81,6 +101,52 @@ impl WriterHandle {
 
         self.sender
             .send(WriterMessage::Publish(cmd))
+            .await
+            .map_err(|_| WriterError::ChannelClosed)?;
+
+        reply_rx.await.map_err(|_| WriterError::ChannelClosed)?
+    }
+
+    /// Get or create a subscription.
+    pub async fn get_or_create_subscription(
+        &self,
+        topic_id: i64,
+        consumer_group: String,
+    ) -> Result<Subscription, WriterError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+
+        let cmd = SubscriptionCommand {
+            topic_id,
+            consumer_group,
+            reply: reply_tx,
+        };
+
+        self.sender
+            .send(WriterMessage::GetOrCreateSubscription(cmd))
+            .await
+            .map_err(|_| WriterError::ChannelClosed)?;
+
+        reply_rx.await.map_err(|_| WriterError::ChannelClosed)?
+    }
+
+    /// Update the cursor for a subscription.
+    pub async fn update_cursor(
+        &self,
+        topic_id: i64,
+        consumer_group: String,
+        cursor_seq: i64,
+    ) -> Result<(), WriterError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+
+        let cmd = CursorUpdateCommand {
+            topic_id,
+            consumer_group,
+            cursor_seq,
+            reply: reply_tx,
+        };
+
+        self.sender
+            .send(WriterMessage::UpdateCursor(cmd))
             .await
             .map_err(|_| WriterError::ChannelClosed)?;
 
@@ -202,6 +268,27 @@ fn writer_thread_main(
                 if ready {
                     flush_batch(&conn, &mut batch, &mut topic_cache, &notify_bus)?;
                 }
+            }
+            Some(WriterMessage::GetOrCreateSubscription(cmd)) => {
+                // Flush pending batch first to ensure consistency
+                if !batch.is_empty() {
+                    flush_batch(&conn, &mut batch, &mut topic_cache, &notify_bus)?;
+                }
+                let result =
+                    get_or_create_subscription(&conn, cmd.topic_id, &cmd.consumer_group, now_millis())
+                        .map_err(|e| WriterError::Database(e.to_string()));
+                let _ = cmd.reply.send(result);
+            }
+            Some(WriterMessage::UpdateCursor(cmd)) => {
+                // Flush pending batch first to ensure consistency
+                if !batch.is_empty() {
+                    flush_batch(&conn, &mut batch, &mut topic_cache, &notify_bus)?;
+                }
+                let result =
+                    update_cursor(&conn, cmd.topic_id, &cmd.consumer_group, cmd.cursor_seq, now_millis())
+                        .map(|_| ())
+                        .map_err(|e| WriterError::Database(e.to_string()));
+                let _ = cmd.reply.send(result);
             }
             Some(WriterMessage::Shutdown) => {
                 tracing::info!("Writer thread shutting down");

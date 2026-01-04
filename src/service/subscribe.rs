@@ -19,10 +19,9 @@ use crate::proto::sluice::v1::{
 use crate::server::ServerState;
 use crate::service::ConsumerGroupKey;
 use crate::storage::schema::{
-    fetch_messages_from_seq, get_message_seq_by_id, get_or_create_subscription, get_topic_by_name,
-    get_topic_max_seq, update_cursor,
+    fetch_messages_from_seq, get_message_seq_by_id, get_topic_by_name, get_topic_max_seq,
 };
-use crate::{generate_message_id, now_millis};
+use crate::generate_message_id;
 
 type SubscribeStream =
     Pin<Box<dyn Stream<Item = Result<SubscribeDownstream, Status>> + Send + 'static>>;
@@ -93,25 +92,30 @@ pub async fn handle_subscribe(
         "Subscription init"
     );
 
-    // Look up topic
-    let conn = state
-        .reader_pool
-        .get()
-        .map_err(|e| Status::internal(format!("database error: {e}")))?;
+    // Look up topic using reader pool
+    let topic = {
+        let conn = state
+            .reader_pool
+            .get()
+            .map_err(|e| Status::internal(format!("database error: {e}")))?;
 
-    let topic = get_topic_by_name(&conn, &topic_name)
-        .map_err(|e| Status::internal(format!("database error: {e}")))?
-        .ok_or_else(|| {
-            if initial_position == InitialPosition::Earliest {
-                Status::not_found(format!("topic '{}' does not exist", topic_name))
-            } else {
-                // For LATEST, we'll wait for the topic to be created
-                Status::not_found(format!("topic '{}' does not exist", topic_name))
-            }
-        })?;
+        get_topic_by_name(&conn, &topic_name)
+            .map_err(|e| Status::internal(format!("database error: {e}")))?
+            .ok_or_else(|| {
+                if initial_position == InitialPosition::Earliest {
+                    Status::not_found(format!("topic '{}' does not exist", topic_name))
+                } else {
+                    // For LATEST, we'll wait for the topic to be created
+                    Status::not_found(format!("topic '{}' does not exist", topic_name))
+                }
+            })?
+    };
 
-    // Get or create subscription
-    let subscription = get_or_create_subscription(&conn, topic.id, &consumer_group, now_millis())
+    // Get or create subscription via writer (requires write access)
+    let subscription = state
+        .writer
+        .get_or_create_subscription(topic.id, consumer_group.clone())
+        .await
         .map_err(|e| Status::internal(format!("database error: {e}")))?;
 
     // Determine starting cursor
@@ -119,6 +123,10 @@ pub async fn handle_subscribe(
         InitialPosition::Latest => {
             // Start from max sequence (new messages only)
             if subscription.cursor_seq == 0 {
+                let conn = state
+                    .reader_pool
+                    .get()
+                    .map_err(|e| Status::internal(format!("database error: {e}")))?;
                 get_topic_max_seq(&conn, topic.id)
                     .map_err(|e| Status::internal(format!("database error: {e}")))?
             } else {
@@ -130,8 +138,6 @@ pub async fn handle_subscribe(
             subscription.cursor_seq
         }
     };
-
-    drop(conn);
 
     // Register connection for takeover handling
     let consumer_group_key = ConsumerGroupKey {
@@ -373,27 +379,28 @@ async fn handle_ack(
     message_id: &str,
     cursor: &mut i64,
 ) -> Result<(), Status> {
-    let conn = state
-        .reader_pool
-        .get()
-        .map_err(|e| Status::internal(format!("database error: {e}")))?;
+    // Look up message sequence using reader pool
+    let seq = {
+        let conn = state
+            .reader_pool
+            .get()
+            .map_err(|e| Status::internal(format!("database error: {e}")))?;
 
-    // Look up message sequence
-    let seq = get_message_seq_by_id(&conn, message_id)
-        .map_err(|e| Status::internal(format!("database error: {e}")))?;
+        get_message_seq_by_id(&conn, message_id)
+            .map_err(|e| Status::internal(format!("database error: {e}")))?
+    };
 
     match seq {
         Some(seq) => {
-            // Update cursor
-            let updated = update_cursor(&conn, topic_id, consumer_group, seq, now_millis())
+            // Update cursor via writer (requires write access)
+            state
+                .writer
+                .update_cursor(topic_id, consumer_group.to_string(), seq)
+                .await
                 .map_err(|e| Status::internal(format!("database error: {e}")))?;
 
-            if updated > 0 {
-                *cursor = seq;
-                tracing::debug!(message_id, seq, "Cursor updated");
-            } else {
-                tracing::debug!(message_id, seq, "ACK idempotent (cursor already ahead)");
-            }
+            *cursor = seq;
+            tracing::debug!(message_id, seq, "Cursor updated");
         }
         None => {
             tracing::warn!(message_id, "ACK for unknown message");
