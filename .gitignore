@@ -9,6 +9,7 @@ release/
 # IDE
 .idea/
 *.iml
+.vscode/
 
 # Logs
 *.log
@@ -30,6 +31,9 @@ Thumbs.db
 *.tmp
 *.swp
 *~
+
+# Rust (misc)
+**/*.rs.bk
 
 # Coverage
 *.profraw
