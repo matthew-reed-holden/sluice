@@ -1,5 +1,10 @@
 use anyhow::Result;
 use clap::Parser;
+use crossterm::{
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::prelude::*;
 
 mod app;
 mod controller;
@@ -7,6 +12,9 @@ mod events;
 mod grpc;
 mod proto;
 mod ui;
+
+use controller::Controller;
+use events::spawn_event_reader;
 
 #[derive(Parser, Debug)]
 #[command(name = "lazysluice")]
@@ -40,10 +48,66 @@ async fn main() -> Result<()> {
         .json()
         .try_init();
 
-    let _args = Args::parse();
+    let args = Args::parse();
 
-    // TUI implementation will be wired in subsequent tasks.
-    Ok(())
+    run_tui(args).await
+}
+
+async fn run_tui(args: Args) -> Result<()> {
+    // Install panic hook to restore terminal on panic
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+        original_hook(panic_info);
+    }));
+
+    // Setup terminal
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    // Create controller
+    let mut ctrl = Controller::new(
+        args.endpoint,
+        args.tls_ca,
+        args.tls_domain,
+        args.credits_window,
+    );
+
+    // Initial connect
+    ctrl.connect().await;
+
+    // Spawn event reader (tick every 50ms for responsive message polling)
+    let mut events = spawn_event_reader(std::time::Duration::from_millis(50));
+
+    // Main loop
+    let result = loop {
+        // Poll subscription for new messages
+        ctrl.poll_subscription().await;
+
+        // Draw UI
+        terminal.draw(|f| ui::draw(f, &ctrl.state))?;
+
+        // Wait for next event
+        if let Some(event) = events.recv().await {
+            if !ctrl.handle(event).await {
+                break Ok(());
+            }
+        } else {
+            // Channel closed
+            break Ok(());
+        }
+    };
+
+    // Restore terminal
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    result
 }
 
 #[cfg(test)]

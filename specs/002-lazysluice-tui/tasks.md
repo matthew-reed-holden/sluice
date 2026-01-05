@@ -63,18 +63,18 @@ These bindings define “vim-like / keyboard-driven” MVP behavior (FR-003) and
 
 -- [X] T014 [P] [US1] Implement gRPC connect + optional TLS configuration in crates/lazysluice/src/grpc/client.rs (TLS is enabled when endpoint scheme is `https://`; `--tls-ca` is required for TLS; if endpoint is `http://` then TLS flags are rejected with a clear error)
 -- [X] T015 [P] [US1] Implement `list_topics()` call in crates/lazysluice/src/grpc/client.rs
-- [ ] T016 [US1] Implement crossterm event stream + tick events in crates/lazysluice/src/events.rs
-- [ ] T017 [US1] Implement app state for connection + topic list in crates/lazysluice/src/app.rs
-- [ ] T018 [US1] Implement topic list screen rendering in crates/lazysluice/src/ui.rs
-- [ ] T019 [US1] Implement controller state machine (connect → load topics → select topic) in crates/lazysluice/src/controller.rs
-- [ ] T045 [US1] Implement MVP keybindings (see “MVP Keymap”) in crates/lazysluice/src/controller.rs
-- [ ] T020 [US1] Implement Subscribe stream setup (Init + initial CreditGrant window) in crates/lazysluice/src/grpc/client.rs
-- [ ] T044 [US1] Implement credit refill policy (re-grant `credits_window` when remaining credits drops below `credits_window / 2`, rounding down) in crates/lazysluice/src/grpc/client.rs
-- [ ] T021 [US1] Render delivered messages in tail view in crates/lazysluice/src/ui.rs
-- [ ] T040 [US1] Render required metadata (message_id, sequence, timestamp, attributes summary) in crates/lazysluice/src/ui.rs
-- [ ] T042 [US1] Implement safe payload rendering policy (utf-8 else preview + length + truncation) in crates/lazysluice/src/ui.rs
-- [ ] T043 [P] [US1] Unit test payload rendering policy (utf8, binary, oversized) in crates/lazysluice/src/ui.rs
-- [ ] T022 [US1] Implement auto-reconnect with backoff when subscribe stream drops in crates/lazysluice/src/controller.rs
+- [X] T016 [US1] Implement crossterm event stream + tick events in crates/lazysluice/src/events.rs
+- [X] T017 [US1] Implement app state for connection + topic list in crates/lazysluice/src/app.rs
+- [X] T018 [US1] Implement topic list screen rendering in crates/lazysluice/src/ui.rs
+- [X] T019 [US1] Implement controller state machine (connect → load topics → select topic) in crates/lazysluice/src/controller.rs
+- [X] T045 [US1] Implement MVP keybindings (see “MVP Keymap”) in crates/lazysluice/src/controller.rs
+- [X] T020 [US1] Implement Subscribe stream setup (Init + initial CreditGrant window) in crates/lazysluice/src/grpc/client.rs
+- [X] T044 [US1] Implement credit refill policy (re-grant `credits_window` when remaining credits drops below `credits_window / 2`, rounding down) in crates/lazysluice/src/grpc/client.rs
+- [X] T021 [US1] Render delivered messages in tail view in crates/lazysluice/src/ui.rs
+- [X] T040 [US1] Render required metadata (message_id, sequence, timestamp, attributes summary) in crates/lazysluice/src/ui.rs
+- [X] T042 [US1] Implement safe payload rendering policy (utf-8 else preview + length + truncation) in crates/lazysluice/src/ui.rs
+- [X] T043 [P] [US1] Unit test payload rendering policy (utf8, binary, oversized) in crates/lazysluice/src/ui.rs
+- [X] T022 [US1] Implement auto-reconnect with backoff when subscribe stream drops in crates/lazysluice/src/controller.rs
 
 **Checkpoint**: lazysluice can connect, show topics, and tail a topic from LATEST.
 
@@ -88,14 +88,14 @@ These bindings define “vim-like / keyboard-driven” MVP behavior (FR-003) and
 
 ### Tests for User Story 2
 
-- [ ] T023 [P] [US2] Add unit test for publish input validation (non-empty payload/topic) in crates/lazysluice/src/app.rs
+- [X] T023 [P] [US2] Add unit test for publish input validation (non-empty payload/topic) in crates/lazysluice/src/app.rs
 
 ### Implementation for User Story 2
 
-- [ ] T024 [P] [US2] Implement `publish()` RPC call wrapper in crates/lazysluice/src/grpc/client.rs
-- [ ] T025 [US2] Add publish screen state (draft payload, status) in crates/lazysluice/src/app.rs
-- [ ] T026 [US2] Render publish screen + status messages in crates/lazysluice/src/ui.rs
-- [ ] T027 [US2] Wire keybindings to switch to publish mode and submit publish in crates/lazysluice/src/controller.rs
+- [X] T024 [P] [US2] Implement `publish()` RPC call wrapper in crates/lazysluice/src/grpc/client.rs
+- [X] T025 [US2] Add publish screen state (draft payload, status) in crates/lazysluice/src/app.rs
+- [X] T026 [US2] Render publish screen + status messages in crates/lazysluice/src/ui.rs
+- [X] T027 [US2] Wire keybindings to switch to publish mode and submit publish in crates/lazysluice/src/controller.rs
 
 ---
 
@@ -107,17 +107,17 @@ These bindings define “vim-like / keyboard-driven” MVP behavior (FR-003) and
 
 ### Tests for User Story 3
 
-- [ ] T028 [P] [US3] Add unit test for credits window configuration parsing in crates/lazysluice/src/main.rs
-- [ ] T029 [P] [US3] Add unit test for message ack state tracking in crates/lazysluice/src/app.rs
+- [X] T028 [P] [US3] Add unit test for credits window configuration parsing in crates/lazysluice/src/main.rs
+- [X] T029 [P] [US3] Add unit test for message ack state tracking in crates/lazysluice/src/app.rs
 
 ### Implementation for User Story 3
 
-- [ ] T030 [US3] Add consumer group + initial position selection to subscribe init in crates/lazysluice/src/grpc/client.rs
-- [ ] T031 [US3] Add pause/resume toggle for tail rendering in crates/lazysluice/src/controller.rs
-- [ ] T032 [US3] Track selected message + acked IDs in app state in crates/lazysluice/src/app.rs
-- [ ] T033 [US3] Implement manual Ack RPC send on selected message in crates/lazysluice/src/grpc/client.rs
-- [ ] T034 [US3] Render ack indicator on messages in tail view in crates/lazysluice/src/ui.rs
-- [ ] T035 [US3] Add help/shortcuts screen rendering in crates/lazysluice/src/ui.rs
+- [X] T030 [US3] Add consumer group + initial position selection to subscribe init in crates/lazysluice/src/grpc/client.rs
+- [X] T031 [US3] Add pause/resume toggle for tail rendering in crates/lazysluice/src/controller.rs
+- [X] T032 [US3] Track selected message + acked IDs in app state in crates/lazysluice/src/app.rs
+- [X] T033 [US3] Implement manual Ack RPC send on selected message in crates/lazysluice/src/grpc/client.rs
+- [X] T034 [US3] Render ack indicator on messages in tail view in crates/lazysluice/src/ui.rs
+- [X] T035 [US3] Add help/shortcuts screen rendering in crates/lazysluice/src/ui.rs
 
 **Checkpoint**: Subscription controls and manual ack work end-to-end.
 
@@ -127,12 +127,12 @@ These bindings define “vim-like / keyboard-driven” MVP behavior (FR-003) and
 
 **Purpose**: Tighten UX reliability and ensure quickstart is executable.
 
-- [ ] T036 [P] Add tracing spans/logs for connect/list/subscribe/publish actions in crates/lazysluice/src/controller.rs
+- [X] T036 [P] Add tracing spans/logs for connect/list/subscribe/publish actions in crates/lazysluice/src/controller.rs
 - [ ] T047 [P] Add OpenTelemetry setup in lazysluice (tracing-opentelemetry + OTLP exporter; honor standard OTEL env vars) in crates/lazysluice/src/main.rs
 - [ ] T048 [P] Emit minimal OTEL metrics from lazysluice (message throughput counter, arrival-to-render latency histogram, backpressure/credit events counter) in crates/lazysluice/src/{controller,grpc/client}.rs
-- [ ] T037 [P] Add graceful shutdown / terminal cleanup handling in crates/lazysluice/src/main.rs
-- [ ] T038 Ensure `quickstart.md` commands match built binaries in specs/002-lazysluice-tui/quickstart.md
-- [ ] T039 Run full test suite + clippy + fmt checklist in README.md (documented commands only) in README.md
+- [X] T037 [P] Add graceful shutdown / terminal cleanup handling in crates/lazysluice/src/main.rs
+- [X] T038 Ensure `quickstart.md` commands match built binaries in specs/002-lazysluice-tui/quickstart.md
+- [X] T039 Run full test suite + clippy + fmt checklist in README.md (documented commands only) in README.md
 - [ ] T046 Manual perf validation for SC-001/SC-002/SC-003 (record results in PR description): time-to-first-frame <1s, connect+tail <30s, tail render shows local publishes within ~250ms
 - [ ] T049 Manual usability validation for SC-004 (hallway test protocol; record N, success count, and top failure mode(s) in PR description)
 
