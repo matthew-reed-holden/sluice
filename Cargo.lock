@@ -750,12 +750,9 @@ dependencies = [
  "clap",
  "crossterm",
  "futures",
- "prost",
  "ratatui",
+ "sluice",
  "tokio",
- "tokio-stream",
- "tonic",
- "tonic-build",
  "tracing",
  "tracing-subscriber",
 ]

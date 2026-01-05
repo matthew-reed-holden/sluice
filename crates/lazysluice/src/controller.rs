@@ -4,13 +4,12 @@ use crossterm::event::KeyCode;
 
 use crate::app::{AppState, ConnStatus, Screen};
 use crate::events::Event;
-use crate::grpc::client::{GrpcClient, Subscription};
-use crate::proto::sluice::v1::InitialPosition;
+use sluice::client::{InitialPosition, SluiceClient, Subscription};
 
 /// Controller: owns app state and mutates it in response to events.
 pub struct Controller {
     pub state: AppState,
-    client: Option<GrpcClient>,
+    client: Option<SluiceClient>,
     subscription: Option<Subscription>,
     endpoint: String,
     tls_ca: Option<std::path::PathBuf>,
@@ -43,7 +42,7 @@ impl Controller {
     pub async fn connect(&mut self) {
         tracing::info!("Connecting to server");
         self.state.conn_status = ConnStatus::Connecting;
-        match GrpcClient::connect(
+        match SluiceClient::connect_with(
             &self.endpoint,
             self.tls_ca.as_deref(),
             self.tls_domain.as_deref(),
@@ -90,7 +89,7 @@ impl Controller {
         if let Some(ref mut c) = self.client {
             match c
                 .subscribe(
-                    topic,
+                    &topic,
                     None, // consumer_group: default
                     None, // consumer_id
                     InitialPosition::Latest,
@@ -284,7 +283,7 @@ impl Controller {
             let topic = self.state.publish_topic.clone();
             let payload = self.state.publish_payload.clone().into_bytes();
             tracing::debug!(topic = %topic, payload_len = payload.len(), "Publishing message");
-            match c.publish(topic, payload).await {
+            match c.publish(&topic, payload).await {
                 Ok(resp) => {
                     tracing::info!(message_id = %resp.message_id, seq = resp.sequence, "Message published");
                     self.state.publish_status = Some(format!(
@@ -309,7 +308,7 @@ impl Controller {
         tracing::debug!("Sending ack");
         if let Some(ref sub) = self.subscription {
             // Ack errors are non-fatal for MVP - just log
-            if let Err(e) = sub.send_ack(message_id).await {
+            if let Err(e) = sub.send_ack(&message_id).await {
                 tracing::warn!("Failed to send ack: {e}");
             }
         }

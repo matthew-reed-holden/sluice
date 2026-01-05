@@ -9,8 +9,6 @@ use ratatui::prelude::*;
 mod app;
 mod controller;
 mod events;
-mod grpc;
-mod proto;
 mod ui;
 
 use controller::Controller;

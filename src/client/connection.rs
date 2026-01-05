@@ -149,6 +149,7 @@ impl SluiceClient {
 
         Ok(PublishResult {
             message_id: resp.message_id,
+            sequence: resp.sequence,
         })
     }
 
