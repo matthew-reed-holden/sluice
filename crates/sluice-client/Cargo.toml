@@ -10,20 +10,23 @@ license = "MIT OR Apache-2.0"
 # Proto definitions
 sluice-proto = { path = "../sluice-proto" }
 
-# gRPC (client only, no server features)
-tonic = { version = "0.12", features = ["tls"] }
+# gRPC (client only, with TLS)
+tonic = { workspace = true }
 
-# Async runtime (minimal features for client)
-tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
-tokio-stream = "0.1"
-futures = "0.3"
+# Async runtime (uses workspace features which include "full")
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
 
 # Error handling
-thiserror = "2"
-anyhow = "1"
+thiserror = { workspace = true }
+anyhow = { workspace = true }
 
 # Tracing (optional for debug)
-tracing = "0.1"
+tracing = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [lib]
 name = "sluice_client"

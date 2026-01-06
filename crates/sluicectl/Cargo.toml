@@ -10,21 +10,21 @@ license = "MIT OR Apache-2.0"
 sluice-client = { path = "../sluice-client" }
 
 # CLI
-clap = { version = "4", features = ["derive", "env"] }
+clap = { workspace = true }
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true }
 
 # Error handling
-anyhow = "1"
+anyhow = { workspace = true }
 
 # Output formatting
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Tracing (for debug output)
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [[bin]]
 name = "sluicectl"

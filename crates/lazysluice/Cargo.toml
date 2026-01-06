@@ -6,15 +6,15 @@ description = "Terminal UI client for Sluice"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-anyhow = "1"
-clap = { version = "4", features = ["derive", "env"] }
-crossterm = { version = "0.27", features = ["event-stream"] }
-futures = "0.3"
-ratatui = "0.26"
+anyhow = { workspace = true }
+clap = { workspace = true }
+crossterm = { workspace = true }
+futures = { workspace = true }
+ratatui = { workspace = true }
 sluice-client = { path = "../sluice-client" }
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 [[bin]]
 name = "lazysluice"

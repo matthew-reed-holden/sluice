@@ -1,0 +1,33 @@
+# Cargo configuration for the Sluice workspace
+# Provides convenient aliases for common development tasks
+
+[alias]
+# Check all code without building
+check-all = "check --workspace --all-targets"
+
+# Build commands
+build-all = "build --workspace"
+build-release = "build --workspace --release"
+build-server = "build -p sluice-server --release"
+build-client = "build -p sluice-client"
+build-tools = "build -p sluicectl -p lazysluice"
+
+# Test commands
+test-all = "test --workspace"
+test-server = "test -p sluice-server"
+test-client = "test -p sluice-client"
+test-integration = "test -p sluice-server --test"
+
+# Run commands
+run-server = "run -p sluice-server --"
+run-ctl = "run -p sluicectl --"
+run-tui = "run -p lazysluice"
+
+# Clean and clippy
+clean-all = "clean"
+clippy-all = "clippy --workspace --all-targets"
+clippy-fix = "clippy --workspace --all-targets --fix --allow-dirty"
+
+# Documentation
+doc-all = "doc --workspace --no-deps --open"
+doc-private = "doc --workspace --document-private-items --no-deps"

@@ -12,22 +12,60 @@ Sluice occupies the "middle way" between heavy cluster-native systems (Kafka) an
 - **OpenTelemetry**: Built-in metrics and trace propagation
 - **5,000+ msg/s**: Group commit batching for high throughput
 
+## Project Structure
+
+This is a Cargo workspace containing:
+
+- **sluice-proto** - Protocol buffer definitions shared between client and server
+- **sluice-client** - Lightweight client library (only 6 dependencies)
+- **sluice-server** - Message broker server with SQLite persistence
+- **sluicectl** - Command-line tool for publishing and subscribing
+- **lazysluice** - Terminal UI for monitoring topics and messages
+
+See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
+
 ## Quick Start
 
 ### Build
 
 ```bash
-cargo build --release
+# Build entire workspace
+cargo build --workspace --release
+
+# Or use the convenient alias
+cargo build-release
+
+# Build just the server
+cargo build-server
 ```
 
-### Run
+### Run Server
 
 ```bash
 # Start with defaults (port 50051, data in ./data)
+cargo run-server
+
+# Or run the binary directly
 ./target/release/sluice
 
-# Or with custom configuration
-./target/release/sluice --port 9000 --data-dir /var/lib/sluice --log-level debug
+# With custom configuration
+cargo run-server -- --port 9000 --data-dir /var/lib/sluice --log-level debug
+```
+
+### Use CLI Tools
+
+```bash
+# Publish messages
+cargo run-ctl -- publish my-topic "Hello, World!"
+
+# Subscribe to messages
+cargo run-ctl -- subscribe my-topic
+
+# List topics
+cargo run-ctl -- list-topics
+
+# Launch TUI
+cargo run-tui
 ```
 
 ### CLI Options
@@ -51,7 +89,7 @@ Send `SIGTERM` or `SIGINT` (Ctrl+C) to gracefully shutdown. Sluice will:
 
 ## API
 
-Sluice uses gRPC with Protocol Buffers. See [proto/sluice/v1/sluice.proto](proto/sluice/v1/sluice.proto) for the full service definition.
+Sluice uses gRPC with Protocol Buffers. See [crates/sluice-proto/proto/sluice/v1/sluice.proto](crates/sluice-proto/proto/sluice/v1/sluice.proto) for the full service definition.
 
 ### Publish
 
@@ -73,6 +111,38 @@ Bidirectional streaming for message consumption with credit-based flow control:
 2. Send `CreditGrant` to allow message delivery
 3. Receive `MessageDelivery` as messages become available
 4. Send `Ack` to acknowledge processed messages
+
+## Client Library
+
+The `sluice-client` crate provides a high-level Rust client:
+
+```rust
+use sluice_client::{SluiceClient, ConnectConfig, InitialPosition};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = ConnectConfig::plaintext("http://localhost:50051");
+    let mut client = SluiceClient::connect(config).await?;
+
+    // Publish
+    client.publish("my-topic", b"Hello!".to_vec()).await?;
+
+    // Subscribe
+    let mut sub = client
+        .subscribe("my-topic", Some("group"), None, InitialPosition::Earliest, 10)
+        .await?;
+
+    while let Some(msg) = sub.next_message().await? {
+        println!("Received: {:?}", msg.payload);
+        sub.send_ack(&msg.message_id).await?;
+        sub.maybe_refill_credits().await?;
+    }
+
+    Ok(())
+}
+```
+
+See [crates/sluice-client/README.md](crates/sluice-client/README.md) for complete documentation and [examples](crates/sluice-client/examples/).
 
 ## Metrics
 
