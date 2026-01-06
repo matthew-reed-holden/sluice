@@ -51,6 +51,8 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
             Screen::Tail => draw_tail(frame, main_area, state),
             Screen::Publish => draw_publish(frame, main_area, state),
             Screen::Help => draw_help(frame, main_area),
+            Screen::CreateTopic => draw_create_topic(frame, main_area, state),
+            Screen::MessageDetail => draw_message_detail(frame, main_area, state),
         }
     }
 }
@@ -61,12 +63,29 @@ fn draw_topic_list(frame: &mut Frame, area: Rect, state: &AppState) {
         .iter()
         .enumerate()
         .map(|(i, t)| {
+            // Show indicator for visited topics
+            let visited_marker = if state.visited_topics.contains(&t.name) {
+                "• "
+            } else {
+                "  "
+            };
+
+            let is_current = state
+                .current_topic
+                .as_ref()
+                .is_some_and(|ct| ct == &t.name);
+            let current_marker = if is_current { "▶ " } else { "" };
+
+            let display = format!("{}{}{}", visited_marker, current_marker, t.name);
+
             let style = if i == state.topic_cursor {
                 Style::default().add_modifier(Modifier::REVERSED)
+            } else if is_current {
+                Style::default().fg(Color::Cyan)
             } else {
                 Style::default()
             };
-            ListItem::new(t.name.clone()).style(style)
+            ListItem::new(display).style(style)
         })
         .collect();
 
@@ -96,9 +115,17 @@ fn draw_tail(frame: &mut Frame, area: Rect, state: &AppState) {
             let is_acked = state.acked_ids.contains(&m.message_id);
             let ack_marker = if is_acked { "✓ " } else { "  " };
             let payload = render_payload(&m.payload);
+
+            // Show attribute count if any exist
+            let attr_indicator = if m.attributes.is_empty() {
+                String::new()
+            } else {
+                format!(" [+{} attrs]", m.attributes.len())
+            };
+
             let line = format!(
-                "{}[{}] seq={} ts={} {}",
-                ack_marker, m.message_id, m.sequence, m.timestamp, payload
+                "{}[{}] seq={} ts={} {}{}",
+                ack_marker, m.message_id, m.sequence, m.timestamp, payload, attr_indicator
             );
 
             // Apply color: green for acked, selection highlight if cursor, or default
@@ -206,12 +233,14 @@ fn draw_help(frame: &mut Frame, area: Rect) {
   TOPIC LIST
   Enter    Select topic / start tail
   p        Jump to Publish view
+  c        Create new topic
 
   TAIL VIEW
   Space    Pause/resume tail
   a        Ack selected message
   e        Subscribe from Earliest (history)
   l        Subscribe from Latest (new only)
+  i        Inspect message details
 
   PUBLISH VIEW
   Tab      Switch between Topic/Payload fields
@@ -219,6 +248,134 @@ fn draw_help(frame: &mut Frame, area: Rect) {
   Esc      Return to topic list
 "#;
     let para = Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Help"));
+    frame.render_widget(para, area);
+}
+
+fn draw_create_topic(frame: &mut Frame, area: Rect, state: &AppState) {
+    let status_style = if state
+        .create_topic_status
+        .as_ref()
+        .is_some_and(|s| s.starts_with("Error"))
+    {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default().fg(Color::Green)
+    };
+
+    let can_create = state.can_create_topic();
+    let hint = if can_create {
+        "Enter to create"
+    } else {
+        "Enter topic name (alphanumeric, -, _, .)"
+    };
+
+    let text = vec![
+        Line::from(vec![
+            Span::raw("Topic Name: "),
+            Span::styled(
+                &state.create_topic_name,
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ◄", Style::default().fg(Color::Green)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            state.create_topic_status.as_deref().unwrap_or(hint),
+            status_style,
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Type to enter name, Enter to create, Esc to cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let para = Paragraph::new(text)
+        .block(Block::default().borders(Borders::ALL).title("Create Topic"));
+    frame.render_widget(para, area);
+}
+
+fn draw_message_detail(frame: &mut Frame, area: Rect, state: &AppState) {
+    let Some(ref msg) = state.detail_message else {
+        let text = vec![Line::from("No message selected")];
+        let para = Paragraph::new(text)
+            .block(Block::default().borders(Borders::ALL).title("Message Detail"));
+        frame.render_widget(para, area);
+        return;
+    };
+
+    let is_acked = state.acked_ids.contains(&msg.message_id);
+    let ack_status = if is_acked {
+        Span::styled("ACKNOWLEDGED", Style::default().fg(Color::Green))
+    } else {
+        Span::styled("PENDING", Style::default().fg(Color::Yellow))
+    };
+
+    // Format attributes
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Message ID: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(&msg.message_id),
+        ]),
+        Line::from(vec![
+            Span::styled("Sequence: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(format!("{}", msg.sequence)),
+        ]),
+        Line::from(vec![
+            Span::styled("Timestamp: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(format!("{}", msg.timestamp)),
+        ]),
+        Line::from(vec![
+            Span::styled("Status: ", Style::default().add_modifier(Modifier::BOLD)),
+            ack_status,
+        ]),
+        Line::from(""),
+    ];
+
+    // Add attributes section if any exist
+    if !msg.attributes.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Attributes:",
+            Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan),
+        )));
+        for (key, value) in &msg.attributes {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(key, Style::default().fg(Color::Yellow)),
+                Span::raw(": "),
+                Span::raw(value),
+            ]));
+        }
+        lines.push(Line::from(""));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Attributes: (none)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    // Add payload
+    lines.push(Line::from(Span::styled(
+        format!("Payload ({} bytes):", msg.payload.len()),
+        Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan),
+    )));
+
+    let payload_str = render_payload(&msg.payload);
+    // Split payload into multiple lines if needed
+    for line in payload_str.lines() {
+        lines.push(Line::from(Span::raw(format!("  {}", line))));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Press Esc to close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let para = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title("Message Detail"))
+        .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(para, area);
 }
 

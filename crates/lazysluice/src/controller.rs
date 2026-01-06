@@ -103,6 +103,7 @@ impl Controller {
                     self.state.messages.clear();
                     self.state.message_cursor = 0;
                     self.state.current_topic = Some(topic.clone());  // Track subscribed topic
+                    self.state.visited_topics.insert(topic);  // Mark as visited
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to start subscription");
@@ -205,6 +206,16 @@ impl Controller {
             return self.handle_publish_key(code).await;
         }
 
+        // Handle create topic screen input
+        if self.state.screen == Screen::CreateTopic {
+            return self.handle_create_topic_key(code).await;
+        }
+
+        // Handle message detail screen
+        if self.state.screen == Screen::MessageDetail {
+            return self.handle_message_detail_key(code);
+        }
+
         match code {
             KeyCode::Char('q') => return false,
             KeyCode::Char('?') => {
@@ -216,10 +227,27 @@ impl Controller {
                     Screen::Tail => Screen::Publish,
                     Screen::Publish => Screen::TopicList,
                     Screen::Help => Screen::TopicList,
+                    Screen::CreateTopic => Screen::TopicList,
+                    Screen::MessageDetail => Screen::Tail,
                 };
             }
             KeyCode::Char('p') => {
                 self.state.screen = Screen::Publish;
+            }
+            KeyCode::Char('c') => {
+                if self.state.screen == Screen::TopicList {
+                    self.state.screen = Screen::CreateTopic;
+                    self.state.create_topic_name.clear();
+                    self.state.create_topic_status = None;
+                }
+            }
+            KeyCode::Char('i') => {
+                if self.state.screen == Screen::Tail {
+                    if let Some(msg) = self.state.selected_message().cloned() {
+                        self.state.detail_message = Some(msg);
+                        self.state.screen = Screen::MessageDetail;
+                    }
+                }
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.move_cursor_down();
@@ -345,6 +373,69 @@ impl Controller {
         } else {
             self.state.publish_status = Some("Error: not connected".to_string());
         }
+    }
+
+    async fn handle_create_topic_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Char('q') => return false,
+            KeyCode::Esc => {
+                self.state.screen = Screen::TopicList;
+            }
+            KeyCode::Char(c) => {
+                self.state.create_topic_name.push(c);
+                self.state.create_topic_status = None;
+            }
+            KeyCode::Backspace => {
+                self.state.create_topic_name.pop();
+                self.state.create_topic_status = None;
+            }
+            KeyCode::Enter => {
+                self.submit_create_topic().await;
+            }
+            _ => {}
+        }
+        true
+    }
+
+    async fn submit_create_topic(&mut self) {
+        if !self.state.can_create_topic() {
+            self.state.create_topic_status =
+                Some("Error: topic name must be alphanumeric with -_.".to_string());
+            return;
+        }
+
+        if let Some(ref mut c) = self.client {
+            let topic = self.state.create_topic_name.clone();
+            tracing::debug!(topic = %topic, "Creating topic");
+            // Create topic by publishing an empty message
+            match c.publish(&topic, vec![]).await {
+                Ok(_) => {
+                    tracing::info!(topic = %topic, "Topic created");
+                    self.state.create_topic_status = Some(format!("Created: {}", topic));
+                    // Reload topics to show the new one
+                    self.load_topics().await;
+                    // Return to topic list after brief delay would be nice, but for now stay in dialog
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Topic creation failed");
+                    self.state.create_topic_status = Some(format!("Error: {e}"));
+                }
+            }
+        } else {
+            self.state.create_topic_status = Some("Error: not connected".to_string());
+        }
+    }
+
+    fn handle_message_detail_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Char('q') => return false,
+            KeyCode::Esc => {
+                self.state.screen = Screen::Tail;
+                self.state.detail_message = None;
+            }
+            _ => {}
+        }
+        true
     }
 
     /// Send an Ack for a message ID via the subscription.

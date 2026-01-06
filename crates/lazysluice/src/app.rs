@@ -10,6 +10,8 @@ pub enum Screen {
     Tail,
     Publish,
     Help,
+    CreateTopic,
+    MessageDetail,
 }
 
 /// Active field in publish screen.
@@ -39,6 +41,7 @@ pub struct AppState {
     // Topic list
     pub topics: Vec<Topic>,
     pub topic_cursor: usize,
+    pub visited_topics: std::collections::HashSet<String>,  // Track visited topics
 
     // Tail view
     pub messages: Vec<MessageDelivery>,
@@ -52,6 +55,13 @@ pub struct AppState {
     pub publish_payload: String,
     pub publish_status: Option<String>,
     pub publish_active_field: PublishInputField,
+
+    // Create topic dialog
+    pub create_topic_name: String,
+    pub create_topic_status: Option<String>,
+
+    // Message detail view
+    pub detail_message: Option<MessageDelivery>,
 
     // Help overlay toggle (only applies when screen != Help)
     pub show_help: bool,
@@ -115,6 +125,21 @@ impl AppState {
         } else {
             false
         }
+    }
+
+    /// Validate topic name: must be non-empty and alphanumeric with dashes/underscores.
+    pub fn is_valid_topic_name(name: &str) -> bool {
+        if name.trim().is_empty() {
+            return false;
+        }
+        // Allow alphanumeric, dash, underscore, and dot
+        name.chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    }
+
+    /// Check if topic creation is valid.
+    pub fn can_create_topic(&self) -> bool {
+        Self::is_valid_topic_name(&self.create_topic_name)
     }
 }
 
@@ -249,5 +274,39 @@ mod tests {
         assert!(state.add_message_if_new(msg2));
         assert_eq!(state.messages.len(), 2);
         assert!(state.has_message("msg-002"));
+    }
+
+    #[test]
+    fn validates_topic_names() {
+        // Valid names
+        assert!(AppState::is_valid_topic_name("my-topic"));
+        assert!(AppState::is_valid_topic_name("orders"));
+        assert!(AppState::is_valid_topic_name("user_events"));
+        assert!(AppState::is_valid_topic_name("app.logs.production"));
+        assert!(AppState::is_valid_topic_name("topic123"));
+
+        // Invalid names
+        assert!(!AppState::is_valid_topic_name(""));
+        assert!(!AppState::is_valid_topic_name("   "));
+        assert!(!AppState::is_valid_topic_name("topic with spaces"));
+        assert!(!AppState::is_valid_topic_name("topic/slash"));
+        assert!(!AppState::is_valid_topic_name("topic@special"));
+    }
+
+    #[test]
+    fn can_create_topic_validation() {
+        let mut state = AppState::new(128);
+
+        // Empty name - invalid
+        state.create_topic_name = "".to_string();
+        assert!(!state.can_create_topic());
+
+        // Valid name
+        state.create_topic_name = "new-topic".to_string();
+        assert!(state.can_create_topic());
+
+        // Invalid characters
+        state.create_topic_name = "bad topic name".to_string();
+        assert!(!state.can_create_topic());
     }
 }
