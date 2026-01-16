@@ -7,6 +7,10 @@ service Sluice {
   // Returns only after the message is fsync'd to the WAL.
   rpc Publish(PublishRequest) returns (PublishResponse) {}
 
+  // Batch Publish: Publish multiple messages atomically.
+  // All messages are persisted in a single transaction.
+  rpc BatchPublish(BatchPublishRequest) returns (BatchPublishResponse) {}
+
   // Unary ListTopics: Topic discovery for interactive clients.
   // Returns an ordered list for stable UI rendering.
   rpc ListTopics(ListTopicsRequest) returns (ListTopicsResponse) {}
@@ -53,6 +57,38 @@ message PublishResponse {
   int64 timestamp = 3;
 }
 
+message BatchPublishRequest {
+  // The target topic. Created automatically if it doesn't exist.
+  string topic = 1;
+
+  // The messages to publish atomically.
+  repeated BatchMessage messages = 2;
+}
+
+message BatchMessage {
+  // The opaque payload.
+  bytes payload = 1;
+
+  // Structured headers for tracing and application metadata.
+  map<string, string> attributes = 2;
+}
+
+message BatchPublishResponse {
+  // Results for each message in order.
+  repeated PublishResult results = 1;
+
+  // Common timestamp for all messages in this batch.
+  int64 timestamp = 2;
+}
+
+message PublishResult {
+  // UUIDv7 (Time-sortable) assigned by the server.
+  string message_id = 1;
+
+  // The local monotonic sequence number for this topic.
+  uint64 sequence = 2;
+}
+
 message SubscribeUpstream {
   oneof request {
     // Sent exactly once as the first message to initialize the stream.
@@ -71,11 +107,13 @@ message SubscriptionInit {
   string          consumer_group   = 2; // "default" for MVP if not specified.
   string          consumer_id      = 3; // Optional, for debugging/logging.
   InitialPosition initial_position = 4;
+  uint64          offset           = 5; // Required when initial_position == OFFSET.
 }
 
 enum InitialPosition {
   LATEST   = 0; // Start from new messages only.
   EARLIEST = 1; // Start from the oldest available message.
+  OFFSET   = 2; // Start from a specific sequence number (uses offset field).
 }
 
 message CreditGrant {
@@ -94,8 +132,16 @@ message Ack {
 message SubscribeDownstream {
   oneof response {
     MessageDelivery delivery = 1;
-    // Future expansion: Heartbeats, Rebalancing signals.
+    Heartbeat heartbeat = 2;
   }
+}
+
+message Heartbeat {
+  // Server timestamp (Unix epoch ms).
+  int64 timestamp = 1;
+
+  // Latest sequence number in the topic (for consumer lag awareness).
+  uint64 latest_seq = 2;
 }
 
 message MessageDelivery {

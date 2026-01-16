@@ -33,8 +33,14 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 tracing-opentelemetry = "0.27"
 opentelemetry = "0.26"
-opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio", "metrics"] }
 opentelemetry-otlp = "0.26"
+prometheus = "0.13"
+
+# HTTP server for metrics
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
 
 # CLI and configuration
 clap = { version = "4", features = ["derive", "env"] }
