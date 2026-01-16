@@ -37,6 +37,7 @@ fn make_init(topic: &str, group: &str) -> SubscribeUpstream {
             consumer_group: group.to_string(),
             consumer_id: "quickstart-test".to_string(),
             initial_position: InitialPosition::Earliest as i32,
+            offset: 0,
         })),
     }
 }

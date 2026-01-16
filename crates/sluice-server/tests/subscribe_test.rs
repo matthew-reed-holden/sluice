@@ -27,6 +27,7 @@ fn make_init(topic: &str, consumer_group: &str, position: InitialPosition) -> Su
             consumer_group: consumer_group.to_string(),
             consumer_id: "test-consumer".to_string(),
             initial_position: position as i32,
+            offset: 0,
         })),
     }
 }
@@ -475,6 +476,7 @@ async fn test_subscribe_empty_consumer_group_uses_default() {
             consumer_group: String::new(), // Empty
             consumer_id: "test".to_string(),
             initial_position: InitialPosition::Earliest as i32,
+            offset: 0,
         })),
     })
     .await

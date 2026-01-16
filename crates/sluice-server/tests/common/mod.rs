@@ -106,6 +106,8 @@ impl TestServer {
             config.data_dir.join("sluice.db"),
             notify_bus.clone(),
             config.write_channel_size,
+            sluice_server::storage::batch::BatchConfig::from_config(1, 1),
+            100, // WAL checkpoint pages
         )
         .expect("failed to spawn writer");
         let writer_handle = writer.handle();
