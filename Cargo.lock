@@ -1532,7 +1532,6 @@ checksum = "7a2ae44ef20feb57a68b23d846850f861394c2e02dc425a50098ae8c90267589"
 name = "sluice-client"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "futures",
  "sluice-proto",
  "thiserror 2.0.17",

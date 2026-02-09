@@ -23,12 +23,11 @@
 //! To run multiple consumers that share the workload, run this example
 //! in multiple terminals. Messages will be distributed across the group.
 
-use anyhow::Result;
 use sluice_client::{ConnectConfig, InitialPosition, SluiceClient};
 use std::time::Duration;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing for debug output
     tracing_subscriber::fmt()
         .with_env_filter(

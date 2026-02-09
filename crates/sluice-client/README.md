@@ -75,16 +75,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // Simple publish
 let response = client.publish("topic-name", b"message data".to_vec()).await?;
 
-// With attributes (requires constructing PublishRequest manually)
-use sluice_proto::sluice::v1::PublishRequest;
-let request = PublishRequest {
-    topic: "topic-name".to_string(),
-    payload: b"message data".to_vec(),
-    attributes: vec![
-        Attribute { key: "user_id".to_string(), value: "123".to_string() },
-    ],
-};
-let response = client.publish_request(request).await?;
+// With attributes
+use std::collections::HashMap;
+let mut attrs = HashMap::new();
+attrs.insert("user_id".to_string(), "123".to_string());
+let response = client
+    .publish_with_attributes("topic-name", b"message data".to_vec(), attrs)
+    .await?;
 ```
 
 ### Subscribing to Topics
@@ -159,24 +156,22 @@ subscription.send_credits(5).await?;
 
 ## Error Handling
 
-The client uses `anyhow::Result` for error handling:
+The client uses typed errors via `SluiceError`:
 
 ```rust
-use anyhow::{Context, Result};
+use sluice_client::{SluiceClient, SluiceError};
 
-async fn publish_with_retry(
+async fn publish_safely(
     client: &mut SluiceClient,
     topic: &str,
-    data: Vec<u8>
-) -> Result<String> {
-    client
-        .publish(topic, data)
-        .await
-        .context("Failed to publish message")?
-        .message_id
-        .ok_or_else(|| anyhow::anyhow!("No message ID returned"))
+    data: Vec<u8>,
+) -> Result<String, SluiceError> {
+    let response = client.publish(topic, data).await?;
+    Ok(response.message_id)
 }
 ```
+
+`SluiceError` implements `std::error::Error`, so it works with `anyhow`, `eyre`, or `Box<dyn Error>`.
 
 ## API Reference
 
@@ -184,15 +179,19 @@ async fn publish_with_retry(
 
 - `connect(config: ConnectConfig) -> Result<Self>` - Connect to server
 - `publish(topic: &str, payload: Vec<u8>) -> Result<PublishResponse>` - Publish message
-- `subscribe(topic: &str, consumer_group: Option<&str>, subscription_id: Option<&str>, initial_position: InitialPosition, initial_credits: i32) -> Result<Subscription>` - Subscribe to topic
+- `publish_with_attributes(topic: &str, payload: Vec<u8>, attributes: HashMap<String, String>) -> Result<PublishResponse>` - Publish with metadata
+- `subscribe(topic: &str, consumer_group: Option<&str>, consumer_id: Option<&str>, initial_position: InitialPosition, credits_window: u32) -> Result<Subscription>` - Subscribe to topic
+- `subscribe_browse(topic: &str, credits_window: u32) -> Result<Subscription>` - Non-destructive browse subscription
 - `list_topics() -> Result<Vec<Topic>>` - List all topics
+- `get_topic_stats(topics: Vec<String>) -> Result<Vec<TopicStats>>` - Get topic statistics
 
 ### `Subscription`
 
-- `next_message() -> Result<Option<MessageDelivery>>` - Get next message (blocking)
+- `next_message() -> Result<Option<MessageDelivery>>` - Get next message (skips heartbeats)
+- `next_event() -> Result<Option<SubscriptionEvent>>` - Get next event (includes heartbeats)
 - `send_ack(message_id: &str) -> Result<()>` - Acknowledge message
-- `send_credits(credits: i32) -> Result<()>` - Send credits to server
-- `maybe_refill_credits() -> Result<()>` - Refill if below threshold
+- `send_credit(credits: u32) -> Result<()>` - Send credits to server
+- `maybe_refill_credits() -> Result<bool>` - Refill if below threshold
 
 ### `ConnectConfig`
 

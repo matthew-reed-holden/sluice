@@ -1,6 +1,6 @@
 //! Subscription handling for Sluice client.
 
-use anyhow::{anyhow, Context, Result};
+use crate::error::{Result, SluiceError};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -9,9 +9,22 @@ use tonic::Streaming;
 
 use sluice_proto::sluice::v1::sluice_client::SluiceClient as ProtoClient;
 use sluice_proto::sluice::v1::{
-    subscribe_downstream, subscribe_upstream, Ack, CreditGrant, InitialPosition, MessageDelivery,
-    SubscribeDownstream, SubscribeUpstream, SubscriptionInit, SubscriptionMode,
+    subscribe_downstream, subscribe_upstream, Ack, CreditGrant, Heartbeat, InitialPosition,
+    MessageDelivery, SubscribeDownstream, SubscribeUpstream, SubscriptionInit, SubscriptionMode,
 };
+
+/// An event received from a subscription stream.
+///
+/// Use [`Subscription::next_event()`] to receive these events when you need
+/// visibility into heartbeats. For most use cases, [`Subscription::next_message()`]
+/// is simpler as it automatically skips heartbeats.
+#[derive(Debug)]
+pub enum SubscriptionEvent {
+    /// A message delivery from the server.
+    Message(MessageDelivery),
+    /// A heartbeat from the server with the latest sequence number.
+    Heartbeat(Heartbeat),
+}
 
 /// Configures how credits are refilled.
 #[derive(Debug, Clone)]
@@ -143,7 +156,7 @@ impl Subscription {
         };
         tx.send(init)
             .await
-            .map_err(|_| anyhow!("failed to send subscription init"))?;
+            .map_err(|_| SluiceError::ChannelClosed)?;
 
         // Send initial credit grant
         let credit = SubscribeUpstream {
@@ -153,14 +166,17 @@ impl Subscription {
         };
         tx.send(credit)
             .await
-            .map_err(|_| anyhow!("failed to send initial credits"))?;
+            .map_err(|_| SluiceError::ChannelClosed)?;
 
         // Start the bidirectional stream
         let stream = ReceiverStream::new(rx);
         let response = client
             .subscribe(stream)
             .await
-            .context("subscribe RPC failed")?;
+            .map_err(|source| SluiceError::RpcFailed {
+                method: "subscribe",
+                source,
+            })?;
 
         let remaining_credits = credit_config.window_size;
 
@@ -172,20 +188,60 @@ impl Subscription {
         })
     }
 
-    /// Get the next message delivery, returning None if stream ends.
+    /// Get the next message delivery, returning None if the stream ends.
+    ///
+    /// Heartbeats are consumed internally and do not cause this method to return.
+    /// If you need heartbeat visibility, use [`next_event()`](Self::next_event) instead.
     pub async fn next_message(&mut self) -> Result<Option<MessageDelivery>> {
-        match self.rx.next().await {
-            Some(Ok(downstream)) => {
-                if let Some(subscribe_downstream::Response::Delivery(msg)) = downstream.response {
-                    self.consume_credit();
-                    Ok(Some(msg))
-                } else {
-                    // Heartbeat or other message type - continue receiving
-                    Ok(None)
+        loop {
+            match self.rx.next().await {
+                Some(Ok(downstream)) => match downstream.response {
+                    Some(subscribe_downstream::Response::Delivery(msg)) => {
+                        self.consume_credit();
+                        return Ok(Some(msg));
+                    }
+                    Some(subscribe_downstream::Response::Heartbeat(_)) => continue,
+                    None => continue,
+                },
+                Some(Err(e)) => {
+                    return Err(SluiceError::RpcFailed {
+                        method: "subscribe (stream)",
+                        source: e,
+                    })
                 }
+                None => return Ok(None),
             }
-            Some(Err(e)) => Err(e.into()),
-            None => Ok(None),
+        }
+    }
+
+    /// Get the next event from the subscription stream.
+    ///
+    /// Unlike [`next_message()`](Self::next_message), this method returns
+    /// heartbeat events as well, allowing callers to monitor server liveness
+    /// and track consumer lag via [`Heartbeat::latest_seq`].
+    ///
+    /// Returns `None` when the stream ends.
+    pub async fn next_event(&mut self) -> Result<Option<SubscriptionEvent>> {
+        loop {
+            match self.rx.next().await {
+                Some(Ok(downstream)) => match downstream.response {
+                    Some(subscribe_downstream::Response::Delivery(msg)) => {
+                        self.consume_credit();
+                        return Ok(Some(SubscriptionEvent::Message(msg)));
+                    }
+                    Some(subscribe_downstream::Response::Heartbeat(hb)) => {
+                        return Ok(Some(SubscriptionEvent::Heartbeat(hb)));
+                    }
+                    None => continue,
+                },
+                Some(Err(e)) => {
+                    return Err(SluiceError::RpcFailed {
+                        method: "subscribe (stream)",
+                        source: e,
+                    })
+                }
+                None => return Ok(None),
+            }
         }
     }
 
@@ -195,10 +251,10 @@ impl Subscription {
         let threshold =
             (self.credit_config.window_size as f32 * self.credit_config.refill_threshold) as u32;
         if self.remaining_credits < threshold {
-            let grant = self.credit_config.refill_amount.calculate(
-                self.credit_config.window_size,
-                self.remaining_credits,
-            );
+            let grant = self
+                .credit_config
+                .refill_amount
+                .calculate(self.credit_config.window_size, self.remaining_credits);
             if grant > 0 {
                 self.send_credit(grant).await?;
                 self.remaining_credits += grant;
@@ -220,7 +276,7 @@ impl Subscription {
                 request: Some(subscribe_upstream::Request::Credit(CreditGrant { credits })),
             })
             .await
-            .map_err(|_| anyhow!("subscription channel closed"))
+            .map_err(|_| SluiceError::ChannelClosed)
     }
 
     /// Send an Ack message for a specific message ID.
@@ -232,7 +288,7 @@ impl Subscription {
                 })),
             })
             .await
-            .map_err(|_| anyhow!("subscription channel closed"))
+            .map_err(|_| SluiceError::ChannelClosed)
     }
 
     /// Get the configured credits window size.

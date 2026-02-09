@@ -34,13 +34,17 @@
 //! ```
 
 mod connection;
+pub mod error;
 mod subscription;
 
 pub use connection::{ConnectConfig, RetryConfig, SluiceClient};
-pub use subscription::{AutoRefillSubscription, CreditConfig, RefillAmount, Subscription};
+pub use error::SluiceError;
+pub use subscription::{
+    AutoRefillSubscription, CreditConfig, RefillAmount, Subscription, SubscriptionEvent,
+};
 
 // Re-export proto types that clients commonly use
 pub use sluice_proto::{
-    ConsumerGroupStats, InitialPosition, MessageDelivery, PublishResponse, SubscriptionMode,
-    Topic, TopicStats,
+    ConsumerGroupStats, Heartbeat, InitialPosition, MessageDelivery, PublishResponse,
+    SubscriptionMode, Topic, TopicStats,
 };

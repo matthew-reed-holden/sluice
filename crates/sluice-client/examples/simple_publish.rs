@@ -17,11 +17,10 @@
 //! cargo run --example simple_publish
 //! ```
 
-use anyhow::Result;
 use sluice_client::{ConnectConfig, SluiceClient};
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing for debug output
     tracing_subscriber::fmt()
         .with_env_filter(

@@ -1,10 +1,12 @@
 //! Connection management for Sluice gRPC client.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
+
+use crate::error::{Result, SluiceError};
 
 use sluice_proto::sluice::v1::sluice_client::SluiceClient as ProtoClient;
 use sluice_proto::sluice::v1::{
@@ -127,7 +129,7 @@ impl SluiceClient {
     /// Uses exponential backoff retry logic based on the retry configuration.
     pub async fn connect(config: ConnectConfig) -> Result<Self> {
         let retry_config = config.retry.clone();
-        let mut last_error: Option<anyhow::Error> = None;
+        let mut last_error: Option<SluiceError> = None;
 
         for attempt in 0..=retry_config.max_retries {
             if attempt > 0 {
@@ -154,7 +156,9 @@ impl SluiceClient {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| anyhow!("connection failed")))
+        Err(last_error.unwrap_or_else(|| SluiceError::InvalidConfig {
+            message: "connection failed with no attempts".into(),
+        }))
     }
 
     /// Try to connect once without retry.
@@ -164,20 +168,28 @@ impl SluiceClient {
         let is_http = endpoint.starts_with("http://");
 
         if !is_https && !is_http {
-            return Err(anyhow!("endpoint must start with http:// or https://"));
+            return Err(SluiceError::InvalidConfig {
+                message: "endpoint must start with http:// or https://".into(),
+            });
         }
 
         if is_http {
             if config.tls_ca.is_some() || config.tls_domain.is_some() {
-                return Err(anyhow!(
-                    "TLS options are only valid with https:// endpoints"
-                ));
+                return Err(SluiceError::InvalidConfig {
+                    message: "TLS options are only valid with https:// endpoints".into(),
+                });
             }
-            let channel = Endpoint::from_shared(endpoint.to_string())?
+            let channel = Endpoint::from_shared(endpoint.to_string())
+                .map_err(|e| SluiceError::InvalidConfig {
+                    message: e.to_string(),
+                })?
                 .connect_timeout(Duration::from_secs(5))
                 .connect()
                 .await
-                .context("failed to connect to server")?;
+                .map_err(|source| SluiceError::ConnectionFailed {
+                    endpoint: endpoint.clone(),
+                    source,
+                })?;
             return Ok(Self {
                 inner: ProtoClient::new(channel),
             });
@@ -187,10 +199,14 @@ impl SluiceClient {
         let ca_path = config
             .tls_ca
             .as_ref()
-            .ok_or_else(|| anyhow!("TLS CA certificate path is required for https:// endpoints"))?;
+            .ok_or_else(|| SluiceError::InvalidConfig {
+                message: "TLS CA certificate path is required for https:// endpoints".into(),
+            })?;
 
-        let ca_pem = std::fs::read(Path::new(ca_path))
-            .with_context(|| format!("failed to read TLS CA file: {}", ca_path))?;
+        let ca_pem = std::fs::read(Path::new(ca_path)).map_err(|source| SluiceError::Io {
+            context: format!("failed to read TLS CA file: {}", ca_path),
+            source,
+        })?;
         let ca_cert = Certificate::from_pem(ca_pem);
 
         let mut tls = ClientTlsConfig::new().ca_certificate(ca_cert);
@@ -198,12 +214,22 @@ impl SluiceClient {
             tls = tls.domain_name(domain);
         }
 
-        let channel = Endpoint::from_shared(endpoint.to_string())?
-            .tls_config(tls)?
+        let channel = Endpoint::from_shared(endpoint.to_string())
+            .map_err(|e| SluiceError::InvalidConfig {
+                message: e.to_string(),
+            })?
+            .tls_config(tls)
+            .map_err(|source| SluiceError::ConnectionFailed {
+                endpoint: endpoint.clone(),
+                source,
+            })?
             .connect_timeout(Duration::from_secs(5))
             .connect()
             .await
-            .context("failed to connect to server with TLS")?;
+            .map_err(|source| SluiceError::ConnectionFailed {
+                endpoint: endpoint.clone(),
+                source,
+            })?;
 
         Ok(Self {
             inner: ProtoClient::new(channel),
@@ -231,22 +257,43 @@ impl SluiceClient {
             .inner
             .list_topics(ListTopicsRequest {})
             .await
-            .context("list_topics RPC failed")?
+            .map_err(|source| SluiceError::RpcFailed {
+                method: "list_topics",
+                source,
+            })?
             .into_inner();
         Ok(resp.topics)
     }
 
     /// Publish a message to a topic.
     pub async fn publish(&mut self, topic: &str, payload: Vec<u8>) -> Result<PublishResponse> {
+        self.publish_with_attributes(topic, payload, HashMap::new())
+            .await
+    }
+
+    /// Publish a message to a topic with custom attributes.
+    ///
+    /// Attributes are key-value string pairs attached to the message,
+    /// useful for routing, filtering, or carrying metadata without
+    /// modifying the payload.
+    pub async fn publish_with_attributes(
+        &mut self,
+        topic: &str,
+        payload: Vec<u8>,
+        attributes: HashMap<String, String>,
+    ) -> Result<PublishResponse> {
         let resp = self
             .inner
             .publish(PublishRequest {
                 topic: topic.to_string(),
                 payload,
-                attributes: Default::default(),
+                attributes,
             })
             .await
-            .context("publish RPC failed")?
+            .map_err(|source| SluiceError::RpcFailed {
+                method: "publish",
+                source,
+            })?
             .into_inner();
 
         Ok(PublishResponse {
@@ -297,8 +344,8 @@ impl SluiceClient {
         Subscription::start(
             &mut self.inner,
             topic.to_string(),
-            None, // consumer_group not used in browse mode
-            None, // consumer_id
+            None,                      // consumer_group not used in browse mode
+            None,                      // consumer_id
             InitialPosition::Earliest, // Always start from beginning
             SubscriptionMode::Browse,
             credits_window,
@@ -315,7 +362,10 @@ impl SluiceClient {
             .inner
             .get_topic_stats(GetTopicStatsRequest { topics })
             .await
-            .context("get_topic_stats RPC failed")?
+            .map_err(|source| SluiceError::RpcFailed {
+                method: "get_topic_stats",
+                source,
+            })?
             .into_inner();
         Ok(resp.stats)
     }

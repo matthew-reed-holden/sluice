@@ -20,7 +20,6 @@ futures = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 
 # Tracing (optional for debug)
 tracing = { workspace = true }
