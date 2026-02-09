@@ -238,7 +238,13 @@ impl Writer {
         let handle = thread::Builder::new()
             .name("sluice-writer".into())
             .spawn(move || {
-                if let Err(e) = writer_thread_main(db_path, receiver, notify_bus, batch_config, wal_checkpoint_pages) {
+                if let Err(e) = writer_thread_main(
+                    db_path,
+                    receiver,
+                    notify_bus,
+                    batch_config,
+                    wal_checkpoint_pages,
+                ) {
                     tracing::error!(error = %e, "Writer thread error");
                 }
             })
@@ -282,8 +288,10 @@ fn writer_thread_main(
     initialize_schema(&conn).map_err(|e| WriterError::Database(e.to_string()))?;
 
     // Set WAL auto-checkpoint threshold
-    conn.execute_batch(&format!("PRAGMA wal_autocheckpoint = {wal_checkpoint_pages};"))
-        .map_err(|e| WriterError::Database(e.to_string()))?;
+    conn.execute_batch(&format!(
+        "PRAGMA wal_autocheckpoint = {wal_checkpoint_pages};"
+    ))
+    .map_err(|e| WriterError::Database(e.to_string()))?;
 
     tracing::info!(
         path = ?db_path,
@@ -338,7 +346,13 @@ fn writer_thread_main(
                     flush_batch(&conn, &mut batch, &mut topic_cache, &notify_bus)?;
                 }
                 // Execute batch publish atomically
-                let result = execute_batch_publish(&conn, cmd.topic, cmd.messages, &mut topic_cache, &notify_bus);
+                let result = execute_batch_publish(
+                    &conn,
+                    cmd.topic,
+                    cmd.messages,
+                    &mut topic_cache,
+                    &notify_bus,
+                );
                 let _ = cmd.reply.send(result);
             }
             Some(WriterMessage::GetOrCreateSubscription(cmd)) => {
@@ -418,6 +432,13 @@ fn flush_batch(
     // Track max sequence per topic for notifications
     let mut topic_max_seq: HashMap<i64, i64> = HashMap::new();
 
+    // Collect replies to send AFTER commit succeeds.
+    // This ensures callers never receive Ok before durability is confirmed.
+    let mut pending_replies: Vec<(
+        oneshot::Sender<Result<PublishResult, WriterError>>,
+        PublishResult,
+    )> = Vec::with_capacity(batch_size);
+
     // Execute batch in a transaction
     let tx = conn
         .unchecked_transaction()
@@ -452,18 +473,29 @@ fn flush_batch(
             .and_modify(|max| *max = (*max).max(seq))
             .or_insert(seq);
 
-        // Send reply
+        // Stage reply — do NOT send until commit succeeds
         let result = PublishResult {
             message_id: cmd.message_id,
             sequence: seq,
             timestamp: now,
         };
-        let _ = cmd.reply.send(Ok(result));
+        pending_replies.push((cmd.reply, result));
     }
 
     // Commit transaction (single fsync for entire batch)
-    tx.commit()
-        .map_err(|e| WriterError::Database(e.to_string()))?;
+    if let Err(e) = tx.commit() {
+        let err_msg = e.to_string();
+        // Transaction failed — notify all callers of the failure
+        for (reply, _) in pending_replies {
+            let _ = reply.send(Err(WriterError::Database(err_msg.clone())));
+        }
+        return Err(WriterError::Database(err_msg));
+    }
+
+    // Commit succeeded — now safe to confirm durability to callers
+    for (reply, result) in pending_replies {
+        let _ = reply.send(Ok(result));
+    }
 
     tracing::debug!(batch_size, "Batch committed");
 
