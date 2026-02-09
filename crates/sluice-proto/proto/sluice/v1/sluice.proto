@@ -112,6 +112,12 @@ message SubscribeUpstream {
 
     // Sent to confirm processing, allowing the server to advance the cursor.
     Ack ack = 3;
+
+    // Sent to reject a message and request redelivery.
+    Nack nack = 4;
+
+    // Sent to acknowledge multiple messages at once.
+    BatchAck batch_ack = 5;
   }
 }
 
@@ -148,10 +154,26 @@ message Ack {
   string message_id = 1;
 }
 
+message Nack {
+  // The message_id being rejected.
+  string message_id = 1;
+
+  // Optional delay before redelivery in milliseconds.
+  // 0 = immediate redelivery.
+  uint32 redelivery_delay_ms = 2;
+}
+
+message BatchAck {
+  // The message_ids being acknowledged.
+  // The cursor will be advanced to the maximum sequence among these messages.
+  repeated string message_ids = 1;
+}
+
 message SubscribeDownstream {
   oneof response {
     MessageDelivery delivery = 1;
     Heartbeat heartbeat = 2;
+    StreamError error = 3;
   }
 }
 
@@ -163,12 +185,21 @@ message Heartbeat {
   uint64 latest_seq = 2;
 }
 
+message StreamError {
+  // Error code (e.g. "TOPIC_DELETED", "SLOW_CONSUMER").
+  string code = 1;
+
+  // Human-readable error message.
+  string message = 2;
+}
+
 message MessageDelivery {
   string              message_id = 1;
   uint64              sequence   = 2;
   bytes               payload    = 3;
   map<string, string> attributes = 4;
   int64               timestamp  = 5;
+  uint32              delivery_count = 6;
 }
 
 // GetTopicStats messages

@@ -45,6 +45,6 @@ pub use subscription::{
 
 // Re-export proto types that clients commonly use
 pub use sluice_proto::{
-    ConsumerGroupStats, Heartbeat, InitialPosition, MessageDelivery, PublishResponse,
+    ConsumerGroupStats, Heartbeat, InitialPosition, MessageDelivery, PublishResponse, StreamError,
     SubscriptionMode, Topic, TopicStats,
 };

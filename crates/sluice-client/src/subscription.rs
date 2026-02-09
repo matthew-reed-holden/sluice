@@ -9,8 +9,9 @@ use tonic::Streaming;
 
 use sluice_proto::sluice::v1::sluice_client::SluiceClient as ProtoClient;
 use sluice_proto::sluice::v1::{
-    subscribe_downstream, subscribe_upstream, Ack, CreditGrant, Heartbeat, InitialPosition,
-    MessageDelivery, SubscribeDownstream, SubscribeUpstream, SubscriptionInit, SubscriptionMode,
+    subscribe_downstream, subscribe_upstream, Ack, BatchAck, CreditGrant, Heartbeat,
+    InitialPosition, MessageDelivery, Nack, StreamError, SubscribeDownstream, SubscribeUpstream,
+    SubscriptionInit, SubscriptionMode,
 };
 
 /// An event received from a subscription stream.
@@ -24,6 +25,8 @@ pub enum SubscriptionEvent {
     Message(MessageDelivery),
     /// A heartbeat from the server with the latest sequence number.
     Heartbeat(Heartbeat),
+    /// A stream error from the server (e.g. topic deleted, slow consumer).
+    Error(StreamError),
 }
 
 /// Configures how credits are refilled.
@@ -191,7 +194,8 @@ impl Subscription {
     /// Get the next message delivery, returning None if the stream ends.
     ///
     /// Heartbeats are consumed internally and do not cause this method to return.
-    /// If you need heartbeat visibility, use [`next_event()`](Self::next_event) instead.
+    /// Stream errors from the server are mapped to [`SluiceError::SubscriptionClosed`].
+    /// If you need heartbeat or error visibility, use [`next_event()`](Self::next_event) instead.
     pub async fn next_message(&mut self) -> Result<Option<MessageDelivery>> {
         loop {
             match self.rx.next().await {
@@ -201,6 +205,9 @@ impl Subscription {
                         return Ok(Some(msg));
                     }
                     Some(subscribe_downstream::Response::Heartbeat(_)) => continue,
+                    Some(subscribe_downstream::Response::Error(_)) => {
+                        return Err(SluiceError::SubscriptionClosed)
+                    }
                     None => continue,
                 },
                 Some(Err(e)) => {
@@ -217,8 +224,8 @@ impl Subscription {
     /// Get the next event from the subscription stream.
     ///
     /// Unlike [`next_message()`](Self::next_message), this method returns
-    /// heartbeat events as well, allowing callers to monitor server liveness
-    /// and track consumer lag via [`Heartbeat::latest_seq`].
+    /// heartbeat and error events as well, allowing callers to monitor server liveness,
+    /// track consumer lag via [`Heartbeat::latest_seq`], and handle stream errors.
     ///
     /// Returns `None` when the stream ends.
     pub async fn next_event(&mut self) -> Result<Option<SubscriptionEvent>> {
@@ -231,6 +238,9 @@ impl Subscription {
                     }
                     Some(subscribe_downstream::Response::Heartbeat(hb)) => {
                         return Ok(Some(SubscriptionEvent::Heartbeat(hb)));
+                    }
+                    Some(subscribe_downstream::Response::Error(err)) => {
+                        return Ok(Some(SubscriptionEvent::Error(err)));
                     }
                     None => continue,
                 },
@@ -291,6 +301,38 @@ impl Subscription {
             .map_err(|_| SluiceError::ChannelClosed)
     }
 
+    /// Send a Nack message to reject a specific message and request redelivery.
+    ///
+    /// The server will reset the cursor so this message (and any after it) will
+    /// be redelivered. The `redelivery_delay_ms` parameter controls how long to
+    /// wait before redelivery (0 = immediate).
+    pub async fn send_nack(&self, message_id: &str, redelivery_delay_ms: u32) -> Result<()> {
+        self.tx
+            .send(SubscribeUpstream {
+                request: Some(subscribe_upstream::Request::Nack(Nack {
+                    message_id: message_id.to_string(),
+                    redelivery_delay_ms,
+                })),
+            })
+            .await
+            .map_err(|_| SluiceError::ChannelClosed)
+    }
+
+    /// Send a BatchAck message to acknowledge multiple messages at once.
+    ///
+    /// The server will advance the cursor to the maximum sequence among the
+    /// acknowledged messages.
+    pub async fn send_batch_ack(&self, message_ids: &[String]) -> Result<()> {
+        self.tx
+            .send(SubscribeUpstream {
+                request: Some(subscribe_upstream::Request::BatchAck(BatchAck {
+                    message_ids: message_ids.to_vec(),
+                })),
+            })
+            .await
+            .map_err(|_| SluiceError::ChannelClosed)
+    }
+
     /// Get the configured credits window size.
     pub fn credits_window(&self) -> u32 {
         self.credit_config.window_size
@@ -341,6 +383,16 @@ impl AutoRefillSubscription {
     /// Send an acknowledgment for a message.
     pub async fn send_ack(&self, message_id: &str) -> Result<()> {
         self.inner.send_ack(message_id).await
+    }
+
+    /// Send a Nack to reject a message and request redelivery.
+    pub async fn send_nack(&self, message_id: &str, redelivery_delay_ms: u32) -> Result<()> {
+        self.inner.send_nack(message_id, redelivery_delay_ms).await
+    }
+
+    /// Send a BatchAck to acknowledge multiple messages at once.
+    pub async fn send_batch_ack(&self, message_ids: &[String]) -> Result<()> {
+        self.inner.send_batch_ack(message_ids).await
     }
 
     /// Get the current remaining credits.

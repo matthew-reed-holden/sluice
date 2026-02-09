@@ -2,6 +2,7 @@
 //!
 //! Handles bidirectional streaming for message consumption with credit-based flow control.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -230,6 +231,10 @@ async fn subscription_loop(
     let mut cursor = initial_cursor;
     let mut notify_rx = state.notify_bus.subscribe();
 
+    // In-memory delivery count tracking (per message_id).
+    // Starts at 0; incremented to 1 on first delivery, 2 on redelivery after nack, etc.
+    let mut delivery_counts: HashMap<String, u32> = HashMap::new();
+
     // Heartbeat interval (30 seconds)
     let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
     // Skip first immediate tick
@@ -270,7 +275,7 @@ async fn subscription_loop(
                 return Err(Status::aborted("consumer group takeover"));
             }
 
-            // Handle inbound messages (CreditGrant, Ack)
+            // Handle inbound messages (CreditGrant, Ack, Nack, BatchAck)
             msg = inbound.message() => {
                 match msg {
                     Ok(Some(upstream)) => {
@@ -283,6 +288,12 @@ async fn subscription_loop(
                             }
                             Some(UpstreamRequest::Ack(ack)) => {
                                 handle_ack(&state, topic_id, &consumer_group, &ack.message_id, &mut cursor, browse_mode).await?;
+                            }
+                            Some(UpstreamRequest::Nack(nack)) => {
+                                handle_nack(&state, topic_id, &consumer_group, &nack.message_id, &mut cursor, browse_mode).await?;
+                            }
+                            Some(UpstreamRequest::BatchAck(batch_ack)) => {
+                                handle_batch_ack(&state, topic_id, &consumer_group, &batch_ack.message_ids, &mut cursor, browse_mode).await?;
                             }
                             Some(UpstreamRequest::Init(_)) => {
                                 return Err(Status::invalid_argument("unexpected SubscriptionInit"));
@@ -335,7 +346,7 @@ async fn subscription_loop(
                 match notification {
                     Ok(notif) if notif.topic_id == topic_id => {
                         // New data available, try to deliver
-                        deliver_messages(&state, &tx, topic_id, &topic_name, &consumer_group, &mut cursor, &credits).await?;
+                        deliver_messages(&state, &tx, topic_id, &topic_name, &consumer_group, &mut cursor, &credits, &mut delivery_counts).await?;
                     }
                     Ok(_) => {
                         // Notification for different topic, ignore
@@ -343,7 +354,7 @@ async fn subscription_loop(
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(lagged = n, "Notification receiver lagged");
                         // Try to deliver anyway
-                        deliver_messages(&state, &tx, topic_id, &topic_name, &consumer_group, &mut cursor, &credits).await?;
+                        deliver_messages(&state, &tx, topic_id, &topic_name, &consumer_group, &mut cursor, &credits, &mut delivery_counts).await?;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         tracing::info!("Notification bus closed");
@@ -363,6 +374,7 @@ async fn subscription_loop(
                 &consumer_group,
                 &mut cursor,
                 &credits,
+                &mut delivery_counts,
             )
             .await?;
         }
@@ -379,6 +391,7 @@ async fn deliver_messages(
     consumer_group: &str,
     cursor: &mut i64,
     credits: &Arc<CreditBalance>,
+    delivery_counts: &mut HashMap<String, u32>,
 ) -> Result<(), Status> {
     let available_credits = credits.available();
     if available_credits == 0 {
@@ -421,12 +434,18 @@ async fn deliver_messages(
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
 
+        // Track delivery count: increment for this message_id
+        let count = delivery_counts.entry(msg.message_id.clone()).or_insert(0);
+        *count += 1;
+        let delivery_count = *count;
+
         let delivery = MessageDelivery {
             message_id: msg.message_id,
             sequence: msg.global_seq as u64,
             payload: msg.payload.unwrap_or_default(),
             attributes,
             timestamp: msg.created_at,
+            delivery_count,
         };
 
         // Send to client
@@ -488,6 +507,116 @@ async fn handle_ack(
         None => {
             tracing::warn!(message_id, "ACK for unknown message");
         }
+    }
+
+    Ok(())
+}
+
+/// Handle a Nack message.
+///
+/// Resets the cursor to just before the nacked message's sequence,
+/// so that message (and any after it) will be redelivered.
+async fn handle_nack(
+    state: &Arc<ServerState>,
+    _topic_id: i64,
+    _consumer_group: &str,
+    message_id: &str,
+    cursor: &mut i64,
+    browse_mode: bool,
+) -> Result<(), Status> {
+    // In browse mode, Nacks are ignored
+    if browse_mode {
+        tracing::debug!(message_id, "Browse mode: NACK ignored");
+        return Ok(());
+    }
+
+    // Look up message sequence
+    let seq = {
+        let conn = state
+            .reader_pool
+            .get()
+            .map_err(|e| Status::internal(format!("database error: {e}")))?;
+
+        get_message_seq_by_id(&conn, message_id)
+            .map_err(|e| Status::internal(format!("database error: {e}")))?
+    };
+
+    match seq {
+        Some(seq) => {
+            // Reset cursor to just before this message so it will be redelivered.
+            // We move the local cursor backwards; the persisted cursor only advances
+            // (via update_cursor's WHERE clause), so no write is needed here.
+            let new_cursor = seq - 1;
+            *cursor = new_cursor;
+            tracing::debug!(
+                message_id,
+                seq,
+                new_cursor,
+                "Nack processed, cursor reset for redelivery"
+            );
+        }
+        None => {
+            tracing::warn!(message_id, "NACK for unknown message");
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle a BatchAck message.
+///
+/// Advances the cursor to the maximum sequence among the acknowledged messages.
+async fn handle_batch_ack(
+    state: &Arc<ServerState>,
+    topic_id: i64,
+    consumer_group: &str,
+    message_ids: &[String],
+    cursor: &mut i64,
+    browse_mode: bool,
+) -> Result<(), Status> {
+    // In browse mode, ACKs don't update the cursor
+    if browse_mode {
+        tracing::debug!(count = message_ids.len(), "Browse mode: BatchAck ignored");
+        return Ok(());
+    }
+
+    if message_ids.is_empty() {
+        return Ok(());
+    }
+
+    // Find the maximum sequence among all acknowledged messages
+    let conn = state
+        .reader_pool
+        .get()
+        .map_err(|e| Status::internal(format!("database error: {e}")))?;
+
+    let mut max_seq: Option<i64> = None;
+    for message_id in message_ids {
+        if let Some(seq) = get_message_seq_by_id(&conn, message_id)
+            .map_err(|e| Status::internal(format!("database error: {e}")))?
+        {
+            max_seq = Some(max_seq.map_or(seq, |current: i64| current.max(seq)));
+        } else {
+            tracing::warn!(message_id = %message_id, "BatchAck: unknown message_id, skipping");
+        }
+    }
+
+    drop(conn);
+
+    if let Some(seq) = max_seq {
+        // Update cursor via writer
+        state
+            .writer
+            .update_cursor(topic_id, consumer_group.to_string(), seq)
+            .await
+            .map_err(|e| Status::internal(format!("database error: {e}")))?;
+
+        *cursor = seq;
+        tracing::debug!(
+            count = message_ids.len(),
+            max_seq = seq,
+            "BatchAck processed, cursor advanced"
+        );
     }
 
     Ok(())

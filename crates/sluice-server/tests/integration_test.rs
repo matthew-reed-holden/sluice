@@ -9,9 +9,9 @@ mod common;
 use futures::StreamExt;
 use sluice_server::proto::sluice::v1::{
     subscribe_downstream::Response as DownstreamResponse,
-    subscribe_upstream::Request as UpstreamRequest, Ack, CreditGrant, DeleteConsumerGroupRequest,
-    DeleteTopicRequest, InitialPosition, PublishRequest, ResetCursorRequest, SubscribeUpstream,
-    SubscriptionInit,
+    subscribe_upstream::Request as UpstreamRequest, Ack, BatchAck, CreditGrant,
+    DeleteConsumerGroupRequest, DeleteTopicRequest, InitialPosition, Nack, PublishRequest,
+    ResetCursorRequest, SubscribeUpstream, SubscriptionInit,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -48,6 +48,23 @@ fn make_ack(message_id: &str) -> SubscribeUpstream {
     SubscribeUpstream {
         request: Some(UpstreamRequest::Ack(Ack {
             message_id: message_id.to_string(),
+        })),
+    }
+}
+
+fn make_nack(message_id: &str, redelivery_delay_ms: u32) -> SubscribeUpstream {
+    SubscribeUpstream {
+        request: Some(UpstreamRequest::Nack(Nack {
+            message_id: message_id.to_string(),
+            redelivery_delay_ms,
+        })),
+    }
+}
+
+fn make_batch_ack(message_ids: &[&str]) -> SubscribeUpstream {
+    SubscribeUpstream {
+        request: Some(UpstreamRequest::BatchAck(BatchAck {
+            message_ids: message_ids.iter().map(|s| s.to_string()).collect(),
         })),
     }
 }
@@ -547,5 +564,215 @@ async fn test_reset_cursor() {
         .into_inner();
     assert!(!resp.updated);
 
+    server.shutdown().await;
+}
+
+/// Nack causes the message to be redelivered with incremented delivery_count.
+#[tokio::test]
+async fn test_nack_redelivers_message() {
+    let server = common::TestServer::start().await;
+    let mut client = server.client().await;
+
+    let topic = "nack-topic";
+
+    // Publish 2 messages
+    client
+        .publish(make_publish(topic, b"msg1"))
+        .await
+        .expect("publish failed");
+    client
+        .publish(make_publish(topic, b"msg2"))
+        .await
+        .expect("publish failed");
+
+    // Subscribe
+    let (tx, rx) = tokio::sync::mpsc::channel::<SubscribeUpstream>(10);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    tx.send(make_init(topic, "nack-group", InitialPosition::Earliest))
+        .await
+        .unwrap();
+    // Grant exactly 1 credit so only msg1 is delivered.
+    // After receiving msg1, credits will be 0, preventing msg2 from
+    // being delivered before we nack.
+    tx.send(make_credit(1)).await.unwrap();
+
+    let response = client.subscribe(stream).await.expect("subscribe failed");
+    let mut sub_stream = response.into_inner();
+
+    // Receive msg1 — delivery_count should be 1 (first delivery)
+    let delivery = timeout(Duration::from_secs(2), sub_stream.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("stream error");
+
+    let msg1_id;
+    if let Some(DownstreamResponse::Delivery(d)) = delivery.response {
+        assert_eq!(d.payload, b"msg1");
+        assert_eq!(d.delivery_count, 1, "first delivery should have count 1");
+        msg1_id = d.message_id.clone();
+    } else {
+        panic!("expected delivery");
+    }
+
+    // Nack msg1 — this should reset the cursor so msg1 is redelivered
+    tx.send(make_nack(&msg1_id, 0)).await.unwrap();
+
+    // Give the server time to process the nack
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Grant 1 credit to trigger redelivery of msg1
+    tx.send(make_credit(1)).await.unwrap();
+
+    // Should receive msg1 again with delivery_count = 2
+    let delivery = timeout(Duration::from_secs(2), sub_stream.next())
+        .await
+        .expect("timeout waiting for redelivery")
+        .expect("stream ended")
+        .expect("stream error");
+
+    if let Some(DownstreamResponse::Delivery(d)) = delivery.response {
+        assert_eq!(d.payload, b"msg1", "nacked message should be redelivered");
+        assert_eq!(
+            d.delivery_count, 2,
+            "redelivered message should have count 2"
+        );
+    } else {
+        panic!("expected redelivery of msg1");
+    }
+
+    drop(tx);
+    server.shutdown().await;
+}
+
+/// BatchAck advances the cursor to the maximum sequence among acknowledged messages.
+#[tokio::test]
+async fn test_batch_ack() {
+    let server = common::TestServer::start().await;
+    let mut client = server.client().await;
+
+    let topic = "batch-ack-topic";
+    let consumer_group = "batch-ack-group";
+
+    // Publish 4 messages
+    for i in 1..=4 {
+        client
+            .publish(make_publish(topic, format!("msg{i}").as_bytes()))
+            .await
+            .expect("publish failed");
+    }
+
+    // First subscription: consume msg1, msg2, msg3, then batch ack them
+    {
+        let (tx, rx) = tokio::sync::mpsc::channel::<SubscribeUpstream>(10);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        tx.send(make_init(topic, consumer_group, InitialPosition::Earliest))
+            .await
+            .unwrap();
+        tx.send(make_credit(10)).await.unwrap();
+
+        let response = client.subscribe(stream).await.expect("subscribe failed");
+        let mut sub_stream = response.into_inner();
+
+        let mut message_ids = Vec::new();
+        for expected in &[b"msg1" as &[u8], b"msg2", b"msg3"] {
+            let delivery = timeout(Duration::from_secs(2), sub_stream.next())
+                .await
+                .expect("timeout")
+                .expect("stream ended")
+                .expect("stream error");
+
+            if let Some(DownstreamResponse::Delivery(d)) = delivery.response {
+                assert_eq!(d.payload, *expected);
+                message_ids.push(d.message_id);
+            } else {
+                panic!("expected delivery");
+            }
+        }
+
+        // Batch ack all 3 messages at once
+        let ids: Vec<&str> = message_ids.iter().map(|s| s.as_str()).collect();
+        tx.send(make_batch_ack(&ids)).await.unwrap();
+
+        // Wait for ack to be processed
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(tx);
+    }
+
+    // Second subscription: should resume from msg4 (cursor advanced to msg3's sequence)
+    {
+        let (tx, rx) = tokio::sync::mpsc::channel::<SubscribeUpstream>(10);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        tx.send(make_init(topic, consumer_group, InitialPosition::Earliest))
+            .await
+            .unwrap();
+        tx.send(make_credit(10)).await.unwrap();
+
+        let response = client.subscribe(stream).await.expect("subscribe failed");
+        let mut sub_stream = response.into_inner();
+
+        let delivery = timeout(Duration::from_secs(2), sub_stream.next())
+            .await
+            .expect("timeout")
+            .expect("stream ended")
+            .expect("stream error");
+
+        if let Some(DownstreamResponse::Delivery(d)) = delivery.response {
+            assert_eq!(
+                d.payload, b"msg4",
+                "should resume from after batch-acked messages"
+            );
+        } else {
+            panic!("expected delivery of msg4");
+        }
+
+        drop(tx);
+    }
+
+    server.shutdown().await;
+}
+
+/// delivery_count starts at 1 on first delivery.
+#[tokio::test]
+async fn test_delivery_count_on_first_delivery() {
+    let server = common::TestServer::start().await;
+    let mut client = server.client().await;
+
+    let topic = "delivery-count-topic";
+
+    // Publish a message
+    client
+        .publish(make_publish(topic, b"hello"))
+        .await
+        .expect("publish failed");
+
+    // Subscribe
+    let (tx, rx) = tokio::sync::mpsc::channel::<SubscribeUpstream>(10);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    tx.send(make_init(topic, "dc-group", InitialPosition::Earliest))
+        .await
+        .unwrap();
+    tx.send(make_credit(10)).await.unwrap();
+
+    let response = client.subscribe(stream).await.expect("subscribe failed");
+    let mut sub_stream = response.into_inner();
+
+    let delivery = timeout(Duration::from_secs(2), sub_stream.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("stream error");
+
+    if let Some(DownstreamResponse::Delivery(d)) = delivery.response {
+        assert_eq!(d.payload, b"hello");
+        assert_eq!(
+            d.delivery_count, 1,
+            "first delivery should have delivery_count = 1"
+        );
+    } else {
+        panic!("expected delivery");
+    }
+
+    drop(tx);
     server.shutdown().await;
 }

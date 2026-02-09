@@ -43,14 +43,14 @@ pub struct AppState {
     // Topic list
     pub topics: Vec<Topic>,
     pub topic_cursor: usize,
-    pub visited_topics: std::collections::HashSet<String>,  // Track visited topics
+    pub visited_topics: std::collections::HashSet<String>, // Track visited topics
 
     // Tail view
     pub messages: Vec<MessageDelivery>,
     pub message_cursor: usize,
     pub paused: bool,
     pub initial_position: InitialPosition,
-    pub current_topic: Option<String>,  // Track which topic we're subscribed to
+    pub current_topic: Option<String>, // Track which topic we're subscribed to
 
     // Publish draft
     pub publish_topic: String,
@@ -89,7 +89,7 @@ pub struct AppState {
     // Search/filter (Phase 4)
     pub search_query: String,
     pub search_active: bool,
-    pub filtered_messages: Vec<usize>,  // Indices into messages vec
+    pub filtered_messages: Vec<usize>, // Indices into messages vec
 
     // Phase 5: Topic stats and browse mode
     pub topic_stats: std::collections::HashMap<String, TopicStats>,
@@ -406,6 +406,7 @@ mod tests {
             payload: vec![1, 2, 3],
             attributes: Default::default(),
             timestamp: 12345,
+            delivery_count: 0,
         };
 
         let msg2 = MessageDelivery {
@@ -414,6 +415,7 @@ mod tests {
             payload: vec![4, 5, 6],
             attributes: Default::default(),
             timestamp: 12346,
+            delivery_count: 0,
         };
 
         // Initially no messages
@@ -537,6 +539,7 @@ mod tests {
             payload: b"hello world".to_vec(),
             attributes: Default::default(),
             timestamp: 12345,
+            delivery_count: 0,
         };
 
         let msg2 = MessageDelivery {
@@ -545,6 +548,7 @@ mod tests {
             payload: b"goodbye moon".to_vec(),
             attributes: Default::default(),
             timestamp: 12346,
+            delivery_count: 0,
         };
 
         state.messages.push(msg1);
@@ -581,6 +585,7 @@ mod tests {
             payload: b"payload".to_vec(),
             attributes: Default::default(),
             timestamp: 12345,
+            delivery_count: 0,
         };
 
         state.messages.push(msg);
@@ -607,6 +612,7 @@ mod tests {
             payload: b"data".to_vec(),
             attributes: attrs,
             timestamp: 12345,
+            delivery_count: 0,
         };
 
         state.messages.push(msg);
@@ -637,6 +643,7 @@ mod tests {
             payload: b"Hello World".to_vec(),
             attributes: Default::default(),
             timestamp: 12345,
+            delivery_count: 0,
         };
 
         state.messages.push(msg);
