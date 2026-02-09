@@ -54,7 +54,9 @@ pub async fn handle_batch_publish(
 
     // Validate batch size
     if req.messages.is_empty() {
-        return Err(Status::invalid_argument("batch must contain at least one message"));
+        return Err(Status::invalid_argument(
+            "batch must contain at least one message",
+        ));
     }
 
     if req.messages.len() > MAX_BATCH_SIZE {

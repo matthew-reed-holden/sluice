@@ -12,10 +12,10 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::watch;
 
-use sluice_server::config::Config;
-use sluice_server::flow::notify::NotificationBus;
 use sluice_proto::sluice::v1::sluice_client::SluiceClient;
 use sluice_proto::sluice::v1::sluice_server::SluiceServer;
+use sluice_server::config::Config;
+use sluice_server::flow::notify::NotificationBus;
 use sluice_server::server::ServerState;
 use sluice_server::service::{ConnectionRegistry, SluiceService};
 use sluice_server::storage::reader::ReaderPool;

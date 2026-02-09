@@ -329,6 +329,55 @@ pub fn get_consumer_groups_for_topic(
     rows.collect()
 }
 
+/// Delete a topic and all its messages and subscriptions.
+///
+/// Returns true if the topic existed and was deleted.
+pub fn delete_topic(conn: &Connection, topic_id: i64) -> Result<bool> {
+    conn.execute(
+        "DELETE FROM messages WHERE topic_id = ?1",
+        params![topic_id],
+    )?;
+    conn.execute(
+        "DELETE FROM subscriptions WHERE topic_id = ?1",
+        params![topic_id],
+    )?;
+    let deleted = conn.execute("DELETE FROM topics WHERE id = ?1", params![topic_id])?;
+    Ok(deleted > 0)
+}
+
+/// Delete a consumer group's subscription for a topic.
+///
+/// Returns true if the subscription existed and was deleted.
+pub fn delete_consumer_group(
+    conn: &Connection,
+    topic_id: i64,
+    consumer_group: &str,
+) -> Result<bool> {
+    let deleted = conn.execute(
+        "DELETE FROM subscriptions WHERE topic_id = ?1 AND consumer_group = ?2",
+        params![topic_id, consumer_group],
+    )?;
+    Ok(deleted > 0)
+}
+
+/// Reset a consumer group's cursor to a specific sequence number.
+///
+/// Unlike `update_cursor`, this allows setting the cursor to any value
+/// (including backwards), for administrative reprocessing use cases.
+/// Returns true if the subscription existed and was updated.
+pub fn reset_cursor(
+    conn: &Connection,
+    topic_id: i64,
+    consumer_group: &str,
+    sequence: i64,
+) -> Result<bool> {
+    let updated = conn.execute(
+        "UPDATE subscriptions SET cursor_seq = ?1, updated_at = ?2 WHERE topic_id = ?3 AND consumer_group = ?4",
+        params![sequence, crate::now_millis(), topic_id, consumer_group],
+    )?;
+    Ok(updated > 0)
+}
+
 /// Get all topics with their IDs.
 pub fn get_all_topics(conn: &Connection) -> Result<Vec<Topic>> {
     let mut stmt = conn.prepare("SELECT id, name, created_at FROM topics ORDER BY name ASC")?;
@@ -457,5 +506,81 @@ mod tests {
         let messages = fetch_messages_from_seq(&conn, topic_id, 2, 10).unwrap();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].global_seq, 3);
+    }
+
+    #[test]
+    fn test_delete_topic() {
+        let conn = setup_test_db();
+        let now = 1234567890000i64;
+
+        let topic_id = insert_or_get_topic(&conn, "orders", now).unwrap();
+
+        // Insert some messages and subscriptions
+        insert_message(&conn, topic_id, "msg-001", Some(b"hello"), None, now).unwrap();
+        insert_message(&conn, topic_id, "msg-002", Some(b"world"), None, now).unwrap();
+        get_or_create_subscription(&conn, topic_id, "workers", now).unwrap();
+
+        // Delete the topic
+        let deleted = delete_topic(&conn, topic_id).unwrap();
+        assert!(deleted);
+
+        // Verify everything is gone
+        assert!(get_topic_by_name(&conn, "orders").unwrap().is_none());
+        let messages = fetch_messages_from_seq(&conn, topic_id, 0, 100).unwrap();
+        assert!(messages.is_empty());
+        let groups = get_consumer_groups_for_topic(&conn, topic_id).unwrap();
+        assert!(groups.is_empty());
+
+        // Deleting again should return false
+        let deleted = delete_topic(&conn, topic_id).unwrap();
+        assert!(!deleted);
+    }
+
+    #[test]
+    fn test_delete_consumer_group() {
+        let conn = setup_test_db();
+        let now = 1234567890000i64;
+
+        let topic_id = insert_or_get_topic(&conn, "orders", now).unwrap();
+        get_or_create_subscription(&conn, topic_id, "workers", now).unwrap();
+        get_or_create_subscription(&conn, topic_id, "analytics", now).unwrap();
+
+        // Delete one consumer group
+        let deleted = delete_consumer_group(&conn, topic_id, "workers").unwrap();
+        assert!(deleted);
+
+        // Verify only analytics remains
+        let groups = get_consumer_groups_for_topic(&conn, topic_id).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_name, "analytics");
+
+        // Deleting again should return false
+        let deleted = delete_consumer_group(&conn, topic_id, "workers").unwrap();
+        assert!(!deleted);
+    }
+
+    #[test]
+    fn test_reset_cursor() {
+        let conn = setup_test_db();
+        let now = 1234567890000i64;
+
+        let topic_id = insert_or_get_topic(&conn, "orders", now).unwrap();
+        get_or_create_subscription(&conn, topic_id, "workers", now).unwrap();
+
+        // Advance cursor to 10
+        update_cursor(&conn, topic_id, "workers", 10, now).unwrap();
+        let sub = get_or_create_subscription(&conn, topic_id, "workers", now).unwrap();
+        assert_eq!(sub.cursor_seq, 10);
+
+        // Reset cursor backwards to 3
+        let updated = reset_cursor(&conn, topic_id, "workers", 3).unwrap();
+        assert!(updated);
+
+        let sub = get_or_create_subscription(&conn, topic_id, "workers", now).unwrap();
+        assert_eq!(sub.cursor_seq, 3);
+
+        // Reset non-existent group returns false
+        let updated = reset_cursor(&conn, topic_id, "nonexistent", 5).unwrap();
+        assert!(!updated);
     }
 }

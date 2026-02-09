@@ -9,8 +9,9 @@ mod common;
 use futures::StreamExt;
 use sluice_server::proto::sluice::v1::{
     subscribe_downstream::Response as DownstreamResponse,
-    subscribe_upstream::Request as UpstreamRequest, Ack, CreditGrant, InitialPosition,
-    PublishRequest, SubscribeUpstream, SubscriptionInit,
+    subscribe_upstream::Request as UpstreamRequest, Ack, CreditGrant, DeleteConsumerGroupRequest,
+    DeleteTopicRequest, InitialPosition, PublishRequest, ResetCursorRequest, SubscribeUpstream,
+    SubscriptionInit,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -275,5 +276,276 @@ async fn test_slow_consumer_does_not_block_producer() {
     }
 
     drop(tx);
+    server.shutdown().await;
+}
+
+/// Admin: DeleteTopic removes topic, messages, and subscriptions.
+#[tokio::test]
+async fn test_delete_topic() {
+    let server = common::TestServer::start().await;
+    let mut client = server.client().await;
+
+    let topic = "delete-me";
+
+    // Publish some messages
+    client
+        .publish(make_publish(topic, b"msg1"))
+        .await
+        .expect("publish failed");
+    client
+        .publish(make_publish(topic, b"msg2"))
+        .await
+        .expect("publish failed");
+
+    // Create a subscription by subscribing
+    let (tx, rx) = tokio::sync::mpsc::channel::<SubscribeUpstream>(10);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    tx.send(make_init(topic, "my-group", InitialPosition::Earliest))
+        .await
+        .unwrap();
+    tx.send(make_credit(1)).await.unwrap();
+
+    let response = client.subscribe(stream).await.expect("subscribe failed");
+    let mut sub_stream = response.into_inner();
+
+    // Receive one message to confirm subscription works
+    let delivery = timeout(Duration::from_secs(2), sub_stream.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("stream error");
+    assert!(matches!(
+        delivery.response,
+        Some(DownstreamResponse::Delivery(_))
+    ));
+    drop(tx);
+
+    // Delete the topic
+    let resp = client
+        .delete_topic(DeleteTopicRequest {
+            topic: topic.to_string(),
+        })
+        .await
+        .expect("delete_topic failed")
+        .into_inner();
+    assert!(resp.deleted);
+
+    // Deleting again should return false
+    let resp = client
+        .delete_topic(DeleteTopicRequest {
+            topic: topic.to_string(),
+        })
+        .await
+        .expect("delete_topic failed")
+        .into_inner();
+    assert!(!resp.deleted);
+
+    // Publishing to the deleted topic should auto-create it again
+    let resp = client
+        .publish(make_publish(topic, b"new msg"))
+        .await
+        .expect("publish after delete failed")
+        .into_inner();
+    // Note: global_seq is AUTOINCREMENT and doesn't reset on topic deletion,
+    // but the publish should succeed and return a valid sequence.
+    assert!(resp.sequence > 0);
+
+    server.shutdown().await;
+}
+
+/// Admin: DeleteConsumerGroup removes subscription but preserves topic.
+#[tokio::test]
+async fn test_delete_consumer_group() {
+    let server = common::TestServer::start().await;
+    let mut client = server.client().await;
+
+    let topic = "cg-topic";
+
+    // Publish messages
+    client
+        .publish(make_publish(topic, b"msg1"))
+        .await
+        .expect("publish failed");
+    client
+        .publish(make_publish(topic, b"msg2"))
+        .await
+        .expect("publish failed");
+
+    // Subscribe with group-a and group-b, consume and ack msg1
+    for group in &["group-a", "group-b"] {
+        let (tx, rx) = tokio::sync::mpsc::channel::<SubscribeUpstream>(10);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        tx.send(make_init(topic, group, InitialPosition::Earliest))
+            .await
+            .unwrap();
+        tx.send(make_credit(1)).await.unwrap();
+
+        let response = client.subscribe(stream).await.expect("subscribe failed");
+        let mut sub_stream = response.into_inner();
+
+        // Consume and ack one message
+        let delivery = timeout(Duration::from_secs(2), sub_stream.next())
+            .await
+            .expect("timeout")
+            .expect("stream ended")
+            .expect("stream error");
+
+        if let Some(DownstreamResponse::Delivery(d)) = delivery.response {
+            tx.send(make_ack(&d.message_id)).await.unwrap();
+        }
+
+        // Wait for ack to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(tx);
+    }
+
+    // Delete group-a
+    let resp = client
+        .delete_consumer_group(DeleteConsumerGroupRequest {
+            topic: topic.to_string(),
+            consumer_group: "group-a".to_string(),
+        })
+        .await
+        .expect("delete_consumer_group failed")
+        .into_inner();
+    assert!(resp.deleted);
+
+    // Deleting again should return false
+    let resp = client
+        .delete_consumer_group(DeleteConsumerGroupRequest {
+            topic: topic.to_string(),
+            consumer_group: "group-a".to_string(),
+        })
+        .await
+        .expect("delete_consumer_group failed")
+        .into_inner();
+    assert!(!resp.deleted);
+
+    // group-b should still work — cursor at msg1, should get msg2
+    let (tx, rx) = tokio::sync::mpsc::channel::<SubscribeUpstream>(10);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    tx.send(make_init(topic, "group-b", InitialPosition::Earliest))
+        .await
+        .unwrap();
+    tx.send(make_credit(10)).await.unwrap();
+
+    let response = client.subscribe(stream).await.expect("subscribe failed");
+    let mut sub_stream = response.into_inner();
+
+    let delivery = timeout(Duration::from_secs(2), sub_stream.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("stream error");
+
+    // group-b acked msg1, so should get msg2 next
+    if let Some(DownstreamResponse::Delivery(d)) = delivery.response {
+        assert_eq!(d.payload, b"msg2");
+    } else {
+        panic!("expected delivery for group-b");
+    }
+
+    drop(tx);
+    server.shutdown().await;
+}
+
+/// Admin: ResetCursor allows reprocessing from a specific sequence.
+#[tokio::test]
+async fn test_reset_cursor() {
+    let server = common::TestServer::start().await;
+    let mut client = server.client().await;
+
+    let topic = "reset-topic";
+    let consumer_group = "reset-group";
+
+    // Publish 3 messages
+    for i in 1..=3 {
+        client
+            .publish(make_publish(topic, format!("msg{i}").as_bytes()))
+            .await
+            .expect("publish failed");
+    }
+
+    // Subscribe, consume and ack all 3
+    {
+        let (tx, rx) = tokio::sync::mpsc::channel::<SubscribeUpstream>(10);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        tx.send(make_init(topic, consumer_group, InitialPosition::Earliest))
+            .await
+            .unwrap();
+        tx.send(make_credit(10)).await.unwrap();
+
+        let response = client.subscribe(stream).await.expect("subscribe failed");
+        let mut sub_stream = response.into_inner();
+
+        for _ in 0..3 {
+            let delivery = timeout(Duration::from_secs(2), sub_stream.next())
+                .await
+                .expect("timeout")
+                .expect("stream ended")
+                .expect("stream error");
+
+            if let Some(DownstreamResponse::Delivery(d)) = delivery.response {
+                tx.send(make_ack(&d.message_id)).await.unwrap();
+            }
+        }
+
+        // Wait for acks to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(tx);
+    }
+
+    // Reset cursor to sequence 1 (reprocess from message 2)
+    let resp = client
+        .reset_cursor(ResetCursorRequest {
+            topic: topic.to_string(),
+            consumer_group: consumer_group.to_string(),
+            sequence: 1,
+        })
+        .await
+        .expect("reset_cursor failed")
+        .into_inner();
+    assert!(resp.updated);
+
+    // Subscribe again — should get msg2 and msg3
+    {
+        let (tx, rx) = tokio::sync::mpsc::channel::<SubscribeUpstream>(10);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        tx.send(make_init(topic, consumer_group, InitialPosition::Earliest))
+            .await
+            .unwrap();
+        tx.send(make_credit(10)).await.unwrap();
+
+        let response = client.subscribe(stream).await.expect("subscribe failed");
+        let mut sub_stream = response.into_inner();
+
+        // Should get msg2 (sequence after cursor=1)
+        let delivery = timeout(Duration::from_secs(2), sub_stream.next())
+            .await
+            .expect("timeout")
+            .expect("stream ended")
+            .expect("stream error");
+
+        if let Some(DownstreamResponse::Delivery(d)) = delivery.response {
+            assert_eq!(d.payload, b"msg2", "should resume from reset position");
+        } else {
+            panic!("expected delivery after cursor reset");
+        }
+
+        drop(tx);
+    }
+
+    // Reset non-existent group should return false
+    let resp = client
+        .reset_cursor(ResetCursorRequest {
+            topic: topic.to_string(),
+            consumer_group: "nonexistent".to_string(),
+            sequence: 0,
+        })
+        .await
+        .expect("reset_cursor failed")
+        .into_inner();
+    assert!(!resp.updated);
+
     server.shutdown().await;
 }

@@ -32,8 +32,7 @@ pub async fn handle_get_topic_stats(
     // Get list of topics to query
     let topics = if req.topics.is_empty() {
         // Return all topics
-        get_all_topics(&conn)
-            .map_err(|e| Status::internal(format!("database error: {e}")))?
+        get_all_topics(&conn).map_err(|e| Status::internal(format!("database error: {e}")))?
     } else {
         // Return only requested topics
         let mut topics = Vec::with_capacity(req.topics.len());

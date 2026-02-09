@@ -23,6 +23,15 @@ service Sluice {
   // Unary GetTopicStats: Retrieve statistics for one or more topics.
   // Returns message counts, sequence ranges, and consumer group info.
   rpc GetTopicStats(GetTopicStatsRequest) returns (GetTopicStatsResponse) {}
+
+  // Admin: Delete a topic and all its messages and subscriptions.
+  rpc DeleteTopic(DeleteTopicRequest) returns (DeleteTopicResponse) {}
+
+  // Admin: Delete a consumer group's subscription for a topic.
+  rpc DeleteConsumerGroup(DeleteConsumerGroupRequest) returns (DeleteConsumerGroupResponse) {}
+
+  // Admin: Reset a consumer group's cursor to a specific sequence number.
+  rpc ResetCursor(ResetCursorRequest) returns (ResetCursorResponse) {}
 }
 
 message ListTopicsRequest {
@@ -189,4 +198,33 @@ message ConsumerGroupStats {
   uint64 cursor_sequence = 2;
   uint64 pending_count = 3;  // last_sequence - cursor_sequence
   int64 last_ack_timestamp = 4;
+}
+
+// Admin RPC messages
+
+message DeleteTopicRequest {
+  string topic = 1;
+}
+
+message DeleteTopicResponse {
+  bool deleted = 1;
+}
+
+message DeleteConsumerGroupRequest {
+  string topic = 1;
+  string consumer_group = 2;
+}
+
+message DeleteConsumerGroupResponse {
+  bool deleted = 1;
+}
+
+message ResetCursorRequest {
+  string topic = 1;
+  string consumer_group = 2;
+  uint64 sequence = 3;
+}
+
+message ResetCursorResponse {
+  bool updated = 1;
 }

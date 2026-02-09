@@ -1,5 +1,6 @@
 //! gRPC service handlers for Sluice.
 
+pub mod admin;
 pub mod batch_publish;
 pub mod publish;
 pub mod registry;
@@ -16,9 +17,10 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::proto::sluice::v1::sluice_server::Sluice;
 use crate::proto::sluice::v1::{
-    BatchPublishRequest, BatchPublishResponse, GetTopicStatsRequest, GetTopicStatsResponse,
-    ListTopicsRequest, ListTopicsResponse, PublishRequest, PublishResponse, SubscribeDownstream,
-    SubscribeUpstream,
+    BatchPublishRequest, BatchPublishResponse, DeleteConsumerGroupRequest,
+    DeleteConsumerGroupResponse, DeleteTopicRequest, DeleteTopicResponse, GetTopicStatsRequest,
+    GetTopicStatsResponse, ListTopicsRequest, ListTopicsResponse, PublishRequest, PublishResponse,
+    ResetCursorRequest, ResetCursorResponse, SubscribeDownstream, SubscribeUpstream,
 };
 use crate::server::ServerState;
 
@@ -74,5 +76,26 @@ impl Sluice for SluiceService {
         request: Request<GetTopicStatsRequest>,
     ) -> Result<Response<GetTopicStatsResponse>, Status> {
         stats::handle_get_topic_stats(&self.state, request).await
+    }
+
+    async fn delete_topic(
+        &self,
+        request: Request<DeleteTopicRequest>,
+    ) -> Result<Response<DeleteTopicResponse>, Status> {
+        admin::handle_delete_topic(&self.state, request).await
+    }
+
+    async fn delete_consumer_group(
+        &self,
+        request: Request<DeleteConsumerGroupRequest>,
+    ) -> Result<Response<DeleteConsumerGroupResponse>, Status> {
+        admin::handle_delete_consumer_group(&self.state, request).await
+    }
+
+    async fn reset_cursor(
+        &self,
+        request: Request<ResetCursorRequest>,
+    ) -> Result<Response<ResetCursorResponse>, Status> {
+        admin::handle_reset_cursor(&self.state, request).await
     }
 }

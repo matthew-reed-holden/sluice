@@ -10,8 +10,9 @@ use crate::error::{Result, SluiceError};
 
 use sluice_proto::sluice::v1::sluice_client::SluiceClient as ProtoClient;
 use sluice_proto::sluice::v1::{
-    GetTopicStatsRequest, InitialPosition, ListTopicsRequest, PublishRequest, PublishResponse,
-    SubscriptionMode, Topic, TopicStats,
+    DeleteConsumerGroupRequest, DeleteTopicRequest, GetTopicStatsRequest, InitialPosition,
+    ListTopicsRequest, PublishRequest, PublishResponse, ResetCursorRequest, SubscriptionMode,
+    Topic, TopicStats,
 };
 
 use super::subscription::Subscription;
@@ -368,5 +369,75 @@ impl SluiceClient {
             })?
             .into_inner();
         Ok(resp.stats)
+    }
+
+    /// Delete a topic and all its messages and subscriptions.
+    ///
+    /// Returns true if the topic existed and was deleted.
+    pub async fn delete_topic(&mut self, topic: &str) -> Result<bool> {
+        let resp = self
+            .inner
+            .delete_topic(DeleteTopicRequest {
+                topic: topic.to_string(),
+            })
+            .await
+            .map_err(|source| SluiceError::RpcFailed {
+                method: "delete_topic",
+                source,
+            })?
+            .into_inner();
+        Ok(resp.deleted)
+    }
+
+    /// Delete a consumer group's subscription for a topic.
+    ///
+    /// Returns true if the subscription existed and was deleted.
+    pub async fn delete_consumer_group(
+        &mut self,
+        topic: &str,
+        consumer_group: &str,
+    ) -> Result<bool> {
+        let resp = self
+            .inner
+            .delete_consumer_group(DeleteConsumerGroupRequest {
+                topic: topic.to_string(),
+                consumer_group: consumer_group.to_string(),
+            })
+            .await
+            .map_err(|source| SluiceError::RpcFailed {
+                method: "delete_consumer_group",
+                source,
+            })?
+            .into_inner();
+        Ok(resp.deleted)
+    }
+
+    /// Reset a consumer group's cursor to a specific sequence number.
+    ///
+    /// This allows reprocessing messages from a specific point. The cursor
+    /// can be set to any value, including backwards (unlike normal ACK
+    /// processing which only advances).
+    ///
+    /// Returns true if the subscription existed and was updated.
+    pub async fn reset_cursor(
+        &mut self,
+        topic: &str,
+        consumer_group: &str,
+        sequence: u64,
+    ) -> Result<bool> {
+        let resp = self
+            .inner
+            .reset_cursor(ResetCursorRequest {
+                topic: topic.to_string(),
+                consumer_group: consumer_group.to_string(),
+                sequence,
+            })
+            .await
+            .map_err(|source| SluiceError::RpcFailed {
+                method: "reset_cursor",
+                source,
+            })?
+            .into_inner();
+        Ok(resp.updated)
     }
 }

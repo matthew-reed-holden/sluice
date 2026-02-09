@@ -14,8 +14,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::batch::{BatchAccumulator, BatchConfig};
 use super::schema::{
-    apply_pragmas, get_or_create_subscription, initialize_schema, insert_message,
-    insert_or_get_topic, update_cursor, Subscription,
+    apply_pragmas, delete_consumer_group, delete_topic, get_or_create_subscription,
+    get_topic_by_name, initialize_schema, insert_message, insert_or_get_topic, reset_cursor,
+    update_cursor, Subscription,
 };
 use crate::flow::notify::NotificationBus;
 use crate::now_millis;
@@ -86,6 +87,27 @@ pub struct BatchPublishCommand {
     pub reply: oneshot::Sender<Result<(Vec<BatchPublishResultItem>, i64), WriterError>>,
 }
 
+/// Command to delete a topic and all its data.
+pub struct DeleteTopicCommand {
+    pub topic: String,
+    pub reply: oneshot::Sender<Result<bool, WriterError>>,
+}
+
+/// Command to delete a consumer group's subscription.
+pub struct DeleteConsumerGroupCommand {
+    pub topic: String,
+    pub consumer_group: String,
+    pub reply: oneshot::Sender<Result<bool, WriterError>>,
+}
+
+/// Command to reset a consumer group's cursor.
+pub struct ResetCursorCommand {
+    pub topic: String,
+    pub consumer_group: String,
+    pub sequence: u64,
+    pub reply: oneshot::Sender<Result<bool, WriterError>>,
+}
+
 /// Handle to the writer thread.
 ///
 /// Provides async interface to submit write operations.
@@ -99,6 +121,9 @@ enum WriterMessage {
     BatchPublish(BatchPublishCommand),
     GetOrCreateSubscription(SubscriptionCommand),
     UpdateCursor(CursorUpdateCommand),
+    DeleteTopic(DeleteTopicCommand),
+    DeleteConsumerGroup(DeleteConsumerGroupCommand),
+    ResetCursor(ResetCursorCommand),
     Shutdown,
 }
 
@@ -206,6 +231,75 @@ impl WriterHandle {
             .send(WriterMessage::Shutdown)
             .await
             .map_err(|_| WriterError::ChannelClosed)
+    }
+
+    /// Delete a topic and all its messages and subscriptions.
+    ///
+    /// Returns true if the topic existed and was deleted.
+    pub async fn delete_topic(&self, topic: String) -> Result<bool, WriterError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+
+        let cmd = DeleteTopicCommand {
+            topic,
+            reply: reply_tx,
+        };
+
+        self.sender
+            .send(WriterMessage::DeleteTopic(cmd))
+            .await
+            .map_err(|_| WriterError::ChannelClosed)?;
+
+        reply_rx.await.map_err(|_| WriterError::ChannelClosed)?
+    }
+
+    /// Delete a consumer group's subscription for a topic.
+    ///
+    /// Returns true if the subscription existed and was deleted.
+    pub async fn delete_consumer_group(
+        &self,
+        topic: String,
+        consumer_group: String,
+    ) -> Result<bool, WriterError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+
+        let cmd = DeleteConsumerGroupCommand {
+            topic,
+            consumer_group,
+            reply: reply_tx,
+        };
+
+        self.sender
+            .send(WriterMessage::DeleteConsumerGroup(cmd))
+            .await
+            .map_err(|_| WriterError::ChannelClosed)?;
+
+        reply_rx.await.map_err(|_| WriterError::ChannelClosed)?
+    }
+
+    /// Reset a consumer group's cursor to a specific sequence number.
+    ///
+    /// Returns true if the subscription existed and was updated.
+    pub async fn reset_cursor(
+        &self,
+        topic: String,
+        consumer_group: String,
+        sequence: u64,
+    ) -> Result<bool, WriterError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+
+        let cmd = ResetCursorCommand {
+            topic,
+            consumer_group,
+            sequence,
+            reply: reply_tx,
+        };
+
+        self.sender
+            .send(WriterMessage::ResetCursor(cmd))
+            .await
+            .map_err(|_| WriterError::ChannelClosed)?;
+
+        reply_rx.await.map_err(|_| WriterError::ChannelClosed)?
     }
 }
 
@@ -383,6 +477,61 @@ fn writer_thread_main(
                 )
                 .map(|_| ())
                 .map_err(|e| WriterError::Database(e.to_string()));
+                let _ = cmd.reply.send(result);
+            }
+            Some(WriterMessage::DeleteTopic(cmd)) => {
+                // Flush pending batch first to ensure consistency
+                if !batch.is_empty() {
+                    flush_batch(&conn, &mut batch, &mut topic_cache, &notify_bus)?;
+                }
+                let result = (|| {
+                    let topic = get_topic_by_name(&conn, &cmd.topic)
+                        .map_err(|e| WriterError::Database(e.to_string()))?;
+                    match topic {
+                        Some(t) => {
+                            let deleted = delete_topic(&conn, t.id)
+                                .map_err(|e| WriterError::Database(e.to_string()))?;
+                            // Invalidate topic cache
+                            topic_cache.remove(&cmd.topic);
+                            Ok(deleted)
+                        }
+                        None => Ok(false),
+                    }
+                })();
+                let _ = cmd.reply.send(result);
+            }
+            Some(WriterMessage::DeleteConsumerGroup(cmd)) => {
+                // Flush pending batch first to ensure consistency
+                if !batch.is_empty() {
+                    flush_batch(&conn, &mut batch, &mut topic_cache, &notify_bus)?;
+                }
+                let result = (|| {
+                    let topic = get_topic_by_name(&conn, &cmd.topic)
+                        .map_err(|e| WriterError::Database(e.to_string()))?;
+                    match topic {
+                        Some(t) => delete_consumer_group(&conn, t.id, &cmd.consumer_group)
+                            .map_err(|e| WriterError::Database(e.to_string())),
+                        None => Ok(false),
+                    }
+                })();
+                let _ = cmd.reply.send(result);
+            }
+            Some(WriterMessage::ResetCursor(cmd)) => {
+                // Flush pending batch first to ensure consistency
+                if !batch.is_empty() {
+                    flush_batch(&conn, &mut batch, &mut topic_cache, &notify_bus)?;
+                }
+                let result = (|| {
+                    let topic = get_topic_by_name(&conn, &cmd.topic)
+                        .map_err(|e| WriterError::Database(e.to_string()))?;
+                    match topic {
+                        Some(t) => {
+                            reset_cursor(&conn, t.id, &cmd.consumer_group, cmd.sequence as i64)
+                                .map_err(|e| WriterError::Database(e.to_string()))
+                        }
+                        None => Ok(false),
+                    }
+                })();
                 let _ = cmd.reply.send(result);
             }
             Some(WriterMessage::Shutdown) => {
