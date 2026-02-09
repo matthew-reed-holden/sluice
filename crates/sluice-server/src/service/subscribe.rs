@@ -17,6 +17,7 @@ use crate::proto::sluice::v1::subscribe_downstream::Response as DownstreamRespon
 use crate::proto::sluice::v1::subscribe_upstream::Request as UpstreamRequest;
 use crate::proto::sluice::v1::{
     Heartbeat, InitialPosition, MessageDelivery, SubscribeDownstream, SubscribeUpstream,
+    SubscriptionMode,
 };
 use crate::server::ServerState;
 use crate::service::ConsumerGroupKey;
@@ -70,8 +71,10 @@ pub async fn handle_subscribe(
         ));
     }
 
-    // Extract initial_position early before moving other fields
+    // Extract fields early before moving
     let initial_position = init.initial_position();
+    let subscription_mode = init.mode();
+    let browse_mode = subscription_mode == SubscriptionMode::Browse;
     let topic_name = init.topic.clone();
 
     let consumer_group = if init.consumer_group.is_empty() {
@@ -90,6 +93,7 @@ pub async fn handle_subscribe(
         topic = %topic_name,
         consumer_group = %consumer_group,
         consumer_id = %consumer_id,
+        browse_mode = browse_mode,
         "Subscription init"
     );
 
@@ -112,52 +116,61 @@ pub async fn handle_subscribe(
             })?
     };
 
-    // Get or create subscription via writer (requires write access)
-    let subscription = state
-        .writer
-        .get_or_create_subscription(topic.id, consumer_group.clone())
-        .await
-        .map_err(|e| Status::internal(format!("database error: {e}")))?;
+    // Determine starting cursor based on mode
+    let start_cursor = if browse_mode {
+        // Browse mode: always start from beginning, ignore cursor
+        0
+    } else {
+        // Consumer group mode: get or create subscription
+        let subscription = state
+            .writer
+            .get_or_create_subscription(topic.id, consumer_group.clone())
+            .await
+            .map_err(|e| Status::internal(format!("database error: {e}")))?;
 
-    // Determine starting cursor
-    let start_cursor = match initial_position {
-        InitialPosition::Latest => {
-            // Start from max sequence (new messages only)
-            if subscription.cursor_seq == 0 {
-                let conn = state
-                    .reader_pool
-                    .get()
-                    .map_err(|e| Status::internal(format!("database error: {e}")))?;
-                get_topic_max_seq(&conn, topic.id)
-                    .map_err(|e| Status::internal(format!("database error: {e}")))?
-            } else {
+        match initial_position {
+            InitialPosition::Latest => {
+                // Start from max sequence (new messages only)
+                if subscription.cursor_seq == 0 {
+                    let conn = state
+                        .reader_pool
+                        .get()
+                        .map_err(|e| Status::internal(format!("database error: {e}")))?;
+                    get_topic_max_seq(&conn, topic.id)
+                        .map_err(|e| Status::internal(format!("database error: {e}")))?
+                } else {
+                    subscription.cursor_seq
+                }
+            }
+            InitialPosition::Earliest => {
+                // Use existing cursor or start from 0
                 subscription.cursor_seq
             }
-        }
-        InitialPosition::Earliest => {
-            // Use existing cursor or start from 0
-            subscription.cursor_seq
-        }
-        InitialPosition::Offset => {
-            // Start from specific offset provided in init message
-            if init.offset == 0 {
-                return Err(Status::invalid_argument(
-                    "offset must be provided and > 0 for OFFSET position",
-                ));
+            InitialPosition::Offset => {
+                // Start from specific offset provided in init message
+                if init.offset == 0 {
+                    return Err(Status::invalid_argument(
+                        "offset must be provided and > 0 for OFFSET position",
+                    ));
+                }
+                // Use the offset as cursor position (will start reading from offset + 1)
+                init.offset as i64
             }
-            // Use the offset as cursor position (will start reading from offset + 1)
-            init.offset as i64
         }
     };
 
-    // Register connection for takeover handling
-    let consumer_group_key = ConsumerGroupKey {
-        topic_id: topic.id,
-        consumer_group: consumer_group.clone(),
+    // Register connection for takeover handling (only in consumer group mode)
+    let (consumer_group_key, cancel_rx) = if browse_mode {
+        // Browse mode: no takeover handling needed
+        (None, None)
+    } else {
+        let key = ConsumerGroupKey {
+            topic_id: topic.id,
+            consumer_group: consumer_group.clone(),
+        };
+        let rx = state.connection_registry.register(key.clone());
+        (Some(key), Some(rx))
     };
-    let cancel_rx = state
-        .connection_registry
-        .register(consumer_group_key.clone());
 
     // Create response channel
     let (tx, rx) = mpsc::channel(100);
@@ -182,11 +195,14 @@ pub async fn handle_subscribe(
             start_cursor,
             credits_clone,
             cancel_rx,
+            browse_mode,
         )
         .await;
 
-        // Unregister connection when done
-        state.connection_registry.unregister(&consumer_group_key);
+        // Unregister connection when done (only if registered)
+        if let Some(key) = consumer_group_key {
+            state.connection_registry.unregister(&key);
+        }
 
         if let Err(e) = result {
             tracing::warn!(error = %e, "Subscription ended with error");
@@ -208,7 +224,8 @@ async fn subscription_loop(
     consumer_id: String,
     initial_cursor: i64,
     credits: Arc<CreditBalance>,
-    mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
+    cancel_rx: Option<tokio::sync::oneshot::Receiver<()>>,
+    browse_mode: bool,
 ) -> Result<(), Status> {
     let mut cursor = initial_cursor;
     let mut notify_rx = state.notify_bus.subscribe();
@@ -222,13 +239,27 @@ async fn subscription_loop(
         topic_id,
         consumer_group = %consumer_group,
         cursor,
+        browse_mode,
         "Subscription loop started"
     );
 
+    // Wrap cancel_rx in a fuse so we can poll it optionally
+    let mut cancel_rx = cancel_rx;
+
     loop {
+        // Build the cancel future - either wait for signal or never resolve
+        let cancel_fut = async {
+            if let Some(ref mut rx) = cancel_rx {
+                let _ = rx.await;
+            } else {
+                // In browse mode, never cancel via takeover
+                std::future::pending::<()>().await;
+            }
+        };
+
         tokio::select! {
-            // Handle consumer group takeover (cancellation)
-            _ = &mut cancel_rx => {
+            // Handle consumer group takeover (cancellation) - only in consumer group mode
+            _ = cancel_fut => {
                 tracing::info!(
                     consumer_id = %consumer_id,
                     consumer_group = %consumer_group,
@@ -251,7 +282,7 @@ async fn subscription_loop(
                                 }
                             }
                             Some(UpstreamRequest::Ack(ack)) => {
-                                handle_ack(&state, topic_id, &consumer_group, &ack.message_id, &mut cursor).await?;
+                                handle_ack(&state, topic_id, &consumer_group, &ack.message_id, &mut cursor, browse_mode).await?;
                             }
                             Some(UpstreamRequest::Init(_)) => {
                                 return Err(Status::invalid_argument("unexpected SubscriptionInit"));
@@ -423,7 +454,14 @@ async fn handle_ack(
     consumer_group: &str,
     message_id: &str,
     cursor: &mut i64,
+    browse_mode: bool,
 ) -> Result<(), Status> {
+    // In browse mode, ACKs don't update the cursor
+    if browse_mode {
+        tracing::debug!(message_id, "Browse mode: ACK ignored (cursor not updated)");
+        return Ok(());
+    }
+
     // Look up message sequence using reader pool
     let seq = {
         let conn = state

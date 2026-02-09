@@ -3,6 +3,7 @@
 pub mod batch_publish;
 pub mod publish;
 pub mod registry;
+pub mod stats;
 pub mod subscribe;
 pub mod topics;
 
@@ -15,8 +16,9 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::proto::sluice::v1::sluice_server::Sluice;
 use crate::proto::sluice::v1::{
-    BatchPublishRequest, BatchPublishResponse, ListTopicsRequest, ListTopicsResponse,
-    PublishRequest, PublishResponse, SubscribeDownstream, SubscribeUpstream,
+    BatchPublishRequest, BatchPublishResponse, GetTopicStatsRequest, GetTopicStatsResponse,
+    ListTopicsRequest, ListTopicsResponse, PublishRequest, PublishResponse, SubscribeDownstream,
+    SubscribeUpstream,
 };
 use crate::server::ServerState;
 
@@ -65,5 +67,12 @@ impl Sluice for SluiceService {
         request: Request<ListTopicsRequest>,
     ) -> Result<Response<ListTopicsResponse>, Status> {
         topics::handle_list_topics(&self.state, request).await
+    }
+
+    async fn get_topic_stats(
+        &self,
+        request: Request<GetTopicStatsRequest>,
+    ) -> Result<Response<GetTopicStatsResponse>, Status> {
+        stats::handle_get_topic_stats(&self.state, request).await
     }
 }

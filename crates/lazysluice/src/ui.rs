@@ -11,8 +11,6 @@ use ratatui::{
 use crate::app::{AppState, Screen};
 
 pub fn draw(frame: &mut Frame, state: &AppState) {
-    use crate::app::LayoutMode;
-
     let size = frame.size();
 
     // Status bar at bottom (1 line)
@@ -27,16 +25,10 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     // Render enhanced status bar
     draw_status_bar(frame, status_area, state);
 
-    // Main content - check layout mode
+    // Main content
     if state.show_help || state.screen == Screen::Help {
         draw_help(frame, main_area);
-    } else if state.layout_mode == LayoutMode::ThreePane
-        && matches!(state.screen, Screen::TopicList | Screen::Tail)
-    {
-        // Three-pane layout for topic list and tail views
-        draw_three_pane_layout(frame, main_area, state);
     } else {
-        // Single-pane layout (default)
         match state.screen {
             Screen::TopicList => draw_topic_list(frame, main_area, state),
             Screen::Tail => draw_tail(frame, main_area, state),
@@ -51,7 +43,7 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
 }
 
 fn draw_status_bar(frame: &mut Frame, area: Rect, state: &AppState) {
-    use crate::app::{ConnStatus, LayoutMode};
+    use crate::app::ConnStatus;
 
     let status_text = match &state.conn_status {
         ConnStatus::Disconnected => Span::styled("Disconnected", Style::default().fg(Color::Red)),
@@ -62,10 +54,11 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, state: &AppState) {
         }
     };
 
-    // Add layout mode indicator
-    let layout_indicator = match state.layout_mode {
-        LayoutMode::SinglePane => "",
-        LayoutMode::ThreePane => " [3-PANE]",
+    // Add browse mode indicator
+    let browse_indicator = if state.browse_mode {
+        Span::styled(" [BROWSE]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+    } else {
+        Span::raw("")
     };
 
     // Add subscription info if available
@@ -80,61 +73,14 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, state: &AppState) {
         status_text,
         Span::raw("]"),
         Span::styled(subscription_info, Style::default().fg(Color::Cyan)),
-        Span::styled(layout_indicator, Style::default().fg(Color::Magenta)),
+        browse_indicator,
         Span::raw(" "),
         Span::styled(
-            "q:quit ?:help t:layout Tab:switch",
+            "q:quit ?:help b:browse Tab:switch",
             Style::default().fg(Color::DarkGray),
         ),
     ]));
     frame.render_widget(status_bar, area);
-}
-
-fn draw_three_pane_layout(frame: &mut Frame, area: Rect, state: &AppState) {
-    // Split into three columns: Topics (25%) | Messages (50%) | Details (25%)
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(50),
-            Constraint::Percentage(25),
-        ])
-        .split(area);
-
-    // Left pane: Topics
-    draw_topic_list(frame, panes[0], state);
-
-    // Middle pane: Messages
-    draw_tail(frame, panes[1], state);
-
-    // Right pane: Message detail or info
-    if let Some(msg) = state.selected_message() {
-        let mut detail_state = state.clone();
-        detail_state.detail_message = Some(msg.clone());
-        draw_message_detail(frame, panes[2], &detail_state);
-    } else {
-        // Show placeholder
-        let text = vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "No message selected",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Use j/k or arrows",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(Span::styled(
-                "to select a message",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ];
-        let para = Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL).title("Detail"))
-            .alignment(ratatui::layout::Alignment::Center);
-        frame.render_widget(para, panes[2]);
-    }
 }
 
 fn draw_topic_list(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -156,7 +102,14 @@ fn draw_topic_list(frame: &mut Frame, area: Rect, state: &AppState) {
                 .is_some_and(|ct| ct == &t.name);
             let current_marker = if is_current { "▶ " } else { "" };
 
-            let display = format!("{}{}{}", visited_marker, current_marker, t.name);
+            // Get message count from stats if available
+            let stats_info = if let Some(stats) = state.topic_stats.get(&t.name) {
+                format!(" ({} msgs)", stats.total_messages)
+            } else {
+                String::new()
+            };
+
+            let display = format!("{}{}{}{}", visited_marker, current_marker, t.name, stats_info);
 
             let style = if i == state.topic_cursor {
                 Style::default().add_modifier(Modifier::REVERSED)
@@ -169,7 +122,13 @@ fn draw_topic_list(frame: &mut Frame, area: Rect, state: &AppState) {
         })
         .collect();
 
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Topics"));
+    let title = if state.browse_mode {
+        "Topics [BROWSE MODE]"
+    } else {
+        "Topics"
+    };
+
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(list, area);
 }
 
@@ -314,7 +273,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
   GLOBAL
   q          Quit
   ?          Toggle help
-  t          Toggle layout mode (single/three-pane)
+  b          Toggle browse mode (non-destructive viewing)
   Tab        Cycle views / Switch fields in publish
 
   NAVIGATION
@@ -334,7 +293,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
 
   TAIL VIEW
   Space      Pause/resume tail
-  a          Ack selected message
+  a          Ack selected message (ignored in browse mode)
   e          Subscribe from Earliest (history)
   l          Subscribe from Latest (new only)
   i          Inspect message details

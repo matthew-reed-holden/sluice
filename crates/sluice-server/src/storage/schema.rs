@@ -258,6 +258,90 @@ pub fn get_message_seq_by_id(conn: &Connection, message_id: &str) -> Result<Opti
     .optional()
 }
 
+/// Statistics about messages in a topic.
+#[derive(Debug, Clone, Default)]
+pub struct TopicMessageStats {
+    pub total_messages: u64,
+    pub first_sequence: u64,
+    pub last_sequence: u64,
+    pub first_timestamp: Option<i64>,
+    pub last_timestamp: Option<i64>,
+}
+
+/// Get message statistics for a topic.
+///
+/// Returns count, min/max sequence, and min/max timestamp.
+pub fn get_topic_message_stats(conn: &Connection, topic_id: i64) -> Result<TopicMessageStats> {
+    conn.query_row(
+        r#"
+        SELECT
+            COUNT(*) as total,
+            COALESCE(MIN(global_seq), 0) as first_seq,
+            COALESCE(MAX(global_seq), 0) as last_seq,
+            MIN(created_at) as first_ts,
+            MAX(created_at) as last_ts
+        FROM messages
+        WHERE topic_id = ?1
+        "#,
+        params![topic_id],
+        |row| {
+            Ok(TopicMessageStats {
+                total_messages: row.get::<_, i64>(0)? as u64,
+                first_sequence: row.get::<_, i64>(1)? as u64,
+                last_sequence: row.get::<_, i64>(2)? as u64,
+                first_timestamp: row.get(3)?,
+                last_timestamp: row.get(4)?,
+            })
+        },
+    )
+}
+
+/// Information about a consumer group's position.
+#[derive(Debug, Clone)]
+pub struct ConsumerGroupInfo {
+    pub group_name: String,
+    pub cursor_seq: u64,
+    pub updated_at: Option<i64>,
+}
+
+/// Get all consumer groups for a topic with their cursor positions.
+pub fn get_consumer_groups_for_topic(
+    conn: &Connection,
+    topic_id: i64,
+) -> Result<Vec<ConsumerGroupInfo>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT consumer_group, cursor_seq, updated_at
+        FROM subscriptions
+        WHERE topic_id = ?1
+        ORDER BY consumer_group ASC
+        "#,
+    )?;
+
+    let rows = stmt.query_map(params![topic_id], |row| {
+        Ok(ConsumerGroupInfo {
+            group_name: row.get(0)?,
+            cursor_seq: row.get::<_, i64>(1)? as u64,
+            updated_at: row.get(2)?,
+        })
+    })?;
+
+    rows.collect()
+}
+
+/// Get all topics with their IDs.
+pub fn get_all_topics(conn: &Connection) -> Result<Vec<Topic>> {
+    let mut stmt = conn.prepare("SELECT id, name, created_at FROM topics ORDER BY name ASC")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(Topic {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            created_at: row.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

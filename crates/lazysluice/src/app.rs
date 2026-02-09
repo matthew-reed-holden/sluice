@@ -1,6 +1,6 @@
 //! Application state for lazysluice TUI.
 
-use sluice_client::{InitialPosition, MessageDelivery, Topic};
+use sluice_client::{InitialPosition, MessageDelivery, Topic, TopicStats};
 
 /// Current screen/mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -24,14 +24,6 @@ pub enum PublishInputField {
     Payload,
 }
 
-/// Layout mode for the TUI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LayoutMode {
-    #[default]
-    SinglePane,  // Current behavior
-    ThreePane,   // Topics | Messages | Details
-}
-
 /// Connection status.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ConnStatus {
@@ -47,7 +39,6 @@ pub enum ConnStatus {
 pub struct AppState {
     pub screen: Screen,
     pub conn_status: ConnStatus,
-    pub layout_mode: LayoutMode,
 
     // Topic list
     pub topics: Vec<Topic>,
@@ -99,6 +90,10 @@ pub struct AppState {
     pub search_query: String,
     pub search_active: bool,
     pub filtered_messages: Vec<usize>,  // Indices into messages vec
+
+    // Phase 5: Topic stats and browse mode
+    pub topic_stats: std::collections::HashMap<String, TopicStats>,
+    pub browse_mode: bool,
 }
 
 impl AppState {
@@ -168,14 +163,6 @@ impl AppState {
     /// Check if topic creation is valid.
     pub fn can_create_topic(&self) -> bool {
         Self::is_valid_topic_name(&self.create_topic_name)
-    }
-
-    /// Toggle between single-pane and three-pane layout modes.
-    pub fn toggle_layout_mode(&mut self) {
-        self.layout_mode = match self.layout_mode {
-            LayoutMode::SinglePane => LayoutMode::ThreePane,
-            LayoutMode::ThreePane => LayoutMode::SinglePane,
-        };
     }
 
     /// Record a publish event for metrics tracking.
@@ -252,6 +239,16 @@ impl AppState {
             }
             None => "N/A".to_string(),
         }
+    }
+
+    /// Toggle browse mode on/off.
+    pub fn toggle_browse_mode(&mut self) {
+        self.browse_mode = !self.browse_mode;
+    }
+
+    /// Get topic stats for a topic name.
+    pub fn get_topic_stats(&self, topic_name: &str) -> Option<&TopicStats> {
+        self.topic_stats.get(topic_name)
     }
 
     /// Apply search filter to messages.
@@ -470,28 +467,6 @@ mod tests {
         // Invalid characters
         state.create_topic_name = "bad topic name".to_string();
         assert!(!state.can_create_topic());
-    }
-
-    #[test]
-    fn layout_mode_defaults_to_single_pane() {
-        let state = AppState::new(128);
-        assert_eq!(state.layout_mode, LayoutMode::SinglePane);
-    }
-
-    #[test]
-    fn can_toggle_layout_mode() {
-        let mut state = AppState::new(128);
-
-        // Start in single-pane
-        assert_eq!(state.layout_mode, LayoutMode::SinglePane);
-
-        // Toggle to three-pane
-        state.toggle_layout_mode();
-        assert_eq!(state.layout_mode, LayoutMode::ThreePane);
-
-        // Toggle back to single-pane
-        state.toggle_layout_mode();
-        assert_eq!(state.layout_mode, LayoutMode::SinglePane);
     }
 
     #[test]

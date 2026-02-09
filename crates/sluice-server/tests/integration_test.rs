@@ -32,6 +32,7 @@ fn make_init(topic: &str, consumer_group: &str, position: InitialPosition) -> Su
             consumer_id: "test".to_string(),
             initial_position: position as i32,
             offset: 0,
+            mode: 0, // CONSUMER_GROUP
         })),
     }
 }

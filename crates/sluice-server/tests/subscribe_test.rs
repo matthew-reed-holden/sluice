@@ -28,6 +28,7 @@ fn make_init(topic: &str, consumer_group: &str, position: InitialPosition) -> Su
             consumer_id: "test-consumer".to_string(),
             initial_position: position as i32,
             offset: 0,
+            mode: 0, // CONSUMER_GROUP
         })),
     }
 }
@@ -477,6 +478,7 @@ async fn test_subscribe_empty_consumer_group_uses_default() {
             consumer_id: "test".to_string(),
             initial_position: InitialPosition::Earliest as i32,
             offset: 0,
+            mode: 0, // CONSUMER_GROUP
         })),
     })
     .await
@@ -502,5 +504,302 @@ async fn test_subscribe_empty_consumer_group_uses_default() {
     ));
 
     drop(tx);
+    server.shutdown().await;
+}
+
+// ============================================================================
+// GetTopicStats Tests
+// ============================================================================
+
+/// Test: GetTopicStats returns correct counts and sequences.
+#[tokio::test]
+async fn test_get_topic_stats_returns_correct_data() {
+    use sluice_server::proto::sluice::v1::GetTopicStatsRequest;
+
+    let server = common::TestServer::start().await;
+    let mut client = server.client().await;
+
+    // Publish some messages to a topic
+    for i in 0..5 {
+        client
+            .publish(make_publish("stats-test-topic", format!("msg-{}", i).as_bytes()))
+            .await
+            .expect("publish failed");
+    }
+
+    // Get stats for the topic
+    let response = client
+        .get_topic_stats(GetTopicStatsRequest {
+            topics: vec!["stats-test-topic".to_string()],
+        })
+        .await
+        .expect("get_topic_stats failed")
+        .into_inner();
+
+    assert_eq!(response.stats.len(), 1);
+    let stats = &response.stats[0];
+    assert_eq!(stats.topic, "stats-test-topic");
+    assert_eq!(stats.total_messages, 5);
+    assert_eq!(stats.first_sequence, 1);
+    assert_eq!(stats.last_sequence, 5);
+
+    server.shutdown().await;
+}
+
+/// Test: GetTopicStats returns all topics when no topics specified.
+#[tokio::test]
+async fn test_get_topic_stats_all_topics() {
+    use sluice_server::proto::sluice::v1::GetTopicStatsRequest;
+
+    let server = common::TestServer::start().await;
+    let mut client = server.client().await;
+
+    // Publish to multiple topics
+    client
+        .publish(make_publish("topic-a", b"msg"))
+        .await
+        .expect("publish failed");
+    client
+        .publish(make_publish("topic-b", b"msg"))
+        .await
+        .expect("publish failed");
+
+    // Get stats for all topics (empty request)
+    let response = client
+        .get_topic_stats(GetTopicStatsRequest { topics: vec![] })
+        .await
+        .expect("get_topic_stats failed")
+        .into_inner();
+
+    assert_eq!(response.stats.len(), 2);
+    let topic_names: Vec<&str> = response.stats.iter().map(|s| s.topic.as_str()).collect();
+    assert!(topic_names.contains(&"topic-a"));
+    assert!(topic_names.contains(&"topic-b"));
+
+    server.shutdown().await;
+}
+
+/// Test: GetTopicStats includes consumer group info.
+#[tokio::test]
+async fn test_get_topic_stats_includes_consumer_groups() {
+    use sluice_server::proto::sluice::v1::GetTopicStatsRequest;
+
+    let server = common::TestServer::start().await;
+    let mut client = server.client().await;
+
+    // Publish messages
+    for i in 0..3 {
+        client
+            .publish(make_publish("cg-stats-topic", format!("msg-{}", i).as_bytes()))
+            .await
+            .expect("publish failed");
+    }
+
+    // Subscribe and ack one message to create a consumer group with cursor
+    let (tx, rx) = tokio::sync::mpsc::channel::<SubscribeUpstream>(10);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+    tx.send(make_init("cg-stats-topic", "test-group", InitialPosition::Earliest))
+        .await
+        .unwrap();
+    tx.send(make_credit(10)).await.unwrap();
+
+    let response = client.subscribe(stream).await.expect("subscribe failed");
+    let mut stream = response.into_inner();
+
+    // Receive and ack first message
+    let delivery = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("stream error");
+
+    if let Some(DownstreamResponse::Delivery(msg)) = delivery.response {
+        tx.send(make_ack(&msg.message_id)).await.unwrap();
+        // Small delay for ack to be processed
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    drop(tx);
+
+    // Now get stats
+    let stats_response = client
+        .get_topic_stats(GetTopicStatsRequest {
+            topics: vec!["cg-stats-topic".to_string()],
+        })
+        .await
+        .expect("get_topic_stats failed")
+        .into_inner();
+
+    assert_eq!(stats_response.stats.len(), 1);
+    let stats = &stats_response.stats[0];
+
+    // Should have consumer group info
+    assert!(!stats.consumer_groups.is_empty());
+    let cg = &stats.consumer_groups[0];
+    assert_eq!(cg.group_name, "test-group");
+    assert!(cg.cursor_sequence > 0, "cursor should have advanced");
+
+    server.shutdown().await;
+}
+
+// ============================================================================
+// Browse Mode Tests
+// ============================================================================
+
+/// Helper to create a browse mode subscription init message.
+fn make_browse_init(topic: &str) -> SubscribeUpstream {
+    SubscribeUpstream {
+        request: Some(UpstreamRequest::Init(SubscriptionInit {
+            topic: topic.to_string(),
+            consumer_group: "browse-group".to_string(),
+            consumer_id: "browse-consumer".to_string(),
+            initial_position: InitialPosition::Earliest as i32,
+            offset: 0,
+            mode: 1, // BROWSE
+        })),
+    }
+}
+
+/// Test: Browse mode starts from beginning regardless of cursor.
+#[tokio::test]
+async fn test_browse_mode_starts_from_beginning() {
+    let server = common::TestServer::start().await;
+    let mut client = server.client().await;
+
+    let topic = "browse-test-topic";
+
+    // Publish messages
+    for i in 0..3 {
+        client
+            .publish(make_publish(topic, format!("msg-{}", i).as_bytes()))
+            .await
+            .expect("publish failed");
+    }
+
+    // First, subscribe in consumer group mode and ack all messages
+    let (tx, rx) = tokio::sync::mpsc::channel::<SubscribeUpstream>(10);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+    tx.send(make_init(topic, "browse-group", InitialPosition::Earliest))
+        .await
+        .unwrap();
+    tx.send(make_credit(10)).await.unwrap();
+
+    let response = client.subscribe(stream).await.expect("subscribe failed");
+    let mut stream = response.into_inner();
+
+    // Ack all 3 messages to advance cursor
+    for _ in 0..3 {
+        let delivery = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("timeout")
+            .expect("stream ended")
+            .expect("stream error");
+
+        if let Some(DownstreamResponse::Delivery(msg)) = delivery.response {
+            tx.send(make_ack(&msg.message_id)).await.unwrap();
+        }
+    }
+    drop(tx);
+
+    // Small delay for acks to be processed
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Now subscribe in browse mode - should see all messages again
+    let (tx2, rx2) = tokio::sync::mpsc::channel::<SubscribeUpstream>(10);
+    let stream2 = tokio_stream::wrappers::ReceiverStream::new(rx2);
+
+    tx2.send(make_browse_init(topic)).await.unwrap();
+    tx2.send(make_credit(10)).await.unwrap();
+
+    let response2 = client.subscribe(stream2).await.expect("subscribe failed");
+    let mut stream2 = response2.into_inner();
+
+    // Should receive all 3 messages even though cursor was advanced
+    let mut received = 0;
+    while let Ok(Some(Ok(downstream))) =
+        timeout(Duration::from_secs(1), stream2.next()).await
+    {
+        if let Some(DownstreamResponse::Delivery(_)) = downstream.response {
+            received += 1;
+            if received == 3 {
+                break;
+            }
+        }
+    }
+
+    assert_eq!(received, 3, "Browse mode should see all messages");
+
+    drop(tx2);
+    server.shutdown().await;
+}
+
+/// Test: Browse mode acks don't update cursor.
+#[tokio::test]
+async fn test_browse_mode_acks_ignored() {
+    use sluice_server::proto::sluice::v1::GetTopicStatsRequest;
+
+    let server = common::TestServer::start().await;
+    let mut client = server.client().await;
+
+    let topic = "browse-ack-test";
+
+    // Publish messages
+    client
+        .publish(make_publish(topic, b"msg-1"))
+        .await
+        .expect("publish failed");
+
+    // Subscribe in browse mode
+    let (tx, rx) = tokio::sync::mpsc::channel::<SubscribeUpstream>(10);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+    tx.send(make_browse_init(topic)).await.unwrap();
+    tx.send(make_credit(10)).await.unwrap();
+
+    let response = client.subscribe(stream).await.expect("subscribe failed");
+    let mut stream = response.into_inner();
+
+    // Receive and ack in browse mode
+    let delivery = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("stream error");
+
+    if let Some(DownstreamResponse::Delivery(msg)) = delivery.response {
+        tx.send(make_ack(&msg.message_id)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    drop(tx);
+
+    // Check that cursor was NOT updated (consumer group should have cursor 0 or not exist)
+    let stats_response = client
+        .get_topic_stats(GetTopicStatsRequest {
+            topics: vec![topic.to_string()],
+        })
+        .await
+        .expect("get_topic_stats failed")
+        .into_inner();
+
+    let stats = &stats_response.stats[0];
+
+    // In browse mode, acks shouldn't create/update cursor
+    // The consumer group cursor should be 0 or not exist
+    if !stats.consumer_groups.is_empty() {
+        let cg = stats
+            .consumer_groups
+            .iter()
+            .find(|cg| cg.group_name == "browse-group");
+        if let Some(cg) = cg {
+            assert_eq!(
+                cg.cursor_sequence, 0,
+                "Browse mode should not update cursor"
+            );
+        }
+    }
+
     server.shutdown().await;
 }

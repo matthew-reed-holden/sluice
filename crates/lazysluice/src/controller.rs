@@ -77,6 +77,9 @@ impl Controller {
                     tracing::info!(count = topics.len(), "Loaded topics");
                     self.state.topics = topics;
                     self.state.topic_cursor = 0;
+
+                    // Fetch topic stats for all topics
+                    self.load_topic_stats().await;
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to load topics");
@@ -86,21 +89,49 @@ impl Controller {
         }
     }
 
+    /// Load stats for all topics.
+    #[tracing::instrument(skip(self))]
+    async fn load_topic_stats(&mut self) {
+        tracing::debug!("Loading topic stats");
+        if let Some(ref mut c) = self.client {
+            match c.get_topic_stats(vec![]).await {
+                Ok(stats) => {
+                    tracing::info!(count = stats.len(), "Loaded topic stats");
+                    self.state.topic_stats.clear();
+                    for stat in stats {
+                        self.state.topic_stats.insert(stat.topic.clone(), stat);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to load topic stats");
+                    // Non-fatal - continue without stats
+                }
+            }
+        }
+    }
+
     /// Start a subscription to the given topic.
-    #[tracing::instrument(skip(self), fields(%topic))]
+    #[tracing::instrument(skip(self), fields(%topic, browse_mode = %self.state.browse_mode))]
     async fn start_subscription(&mut self, topic: String) {
         tracing::info!("Starting subscription");
         if let Some(ref mut c) = self.client {
-            match c
-                .subscribe(
+            let result = if self.state.browse_mode {
+                // Browse mode: non-destructive viewing
+                tracing::info!("Using browse mode");
+                c.subscribe_browse(&topic, self.state.credits_window).await
+            } else {
+                // Consumer group mode: normal subscription
+                c.subscribe(
                     &topic,
-                    self.state.consumer_group.as_deref(), // Use selected consumer group
+                    self.state.consumer_group.as_deref(),
                     None, // consumer_id
                     self.state.initial_position,
                     self.state.credits_window,
                 )
                 .await
-            {
+            };
+
+            match result {
                 Ok(sub) => {
                     tracing::info!("Subscription started");
                     self.subscription = Some(sub);
@@ -272,10 +303,6 @@ impl Controller {
                     }
                 }
             }
-            KeyCode::Char('t') => {
-                // Toggle layout mode
-                self.state.toggle_layout_mode();
-            }
             KeyCode::Char('m') => {
                 // Open metrics dashboard
                 if matches!(self.state.screen, Screen::TopicList | Screen::Tail) {
@@ -294,6 +321,16 @@ impl Controller {
                 if self.state.screen == Screen::Tail {
                     self.state.search_active = true;
                     self.state.search_query.clear();
+                }
+            }
+            KeyCode::Char('b') => {
+                // Toggle browse mode
+                if matches!(self.state.screen, Screen::TopicList | Screen::Tail) {
+                    self.state.toggle_browse_mode();
+                    // If we have an active topic, restart subscription with new mode
+                    if let Some(topic) = self.state.current_topic.clone() {
+                        self.start_subscription(topic).await;
+                    }
                 }
             }
             KeyCode::Char('j') | KeyCode::Down => {

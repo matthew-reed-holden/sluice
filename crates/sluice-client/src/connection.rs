@@ -8,7 +8,8 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 
 use sluice_proto::sluice::v1::sluice_client::SluiceClient as ProtoClient;
 use sluice_proto::sluice::v1::{
-    InitialPosition, ListTopicsRequest, PublishRequest, PublishResponse, Topic,
+    GetTopicStatsRequest, InitialPosition, ListTopicsRequest, PublishRequest, PublishResponse,
+    SubscriptionMode, Topic, TopicStats,
 };
 
 use super::subscription::Subscription;
@@ -277,8 +278,45 @@ impl SluiceClient {
             consumer_group.map(String::from),
             consumer_id.map(String::from),
             initial_position,
+            SubscriptionMode::ConsumerGroup,
             credits_window,
         )
         .await
+    }
+
+    /// Start a browse subscription to a topic.
+    ///
+    /// Browse mode reads all messages from the beginning without affecting
+    /// the consumer group cursor. ACKs are ignored in browse mode.
+    /// This is useful for debugging and inspecting topic contents.
+    pub async fn subscribe_browse(
+        &mut self,
+        topic: &str,
+        credits_window: u32,
+    ) -> Result<Subscription> {
+        Subscription::start(
+            &mut self.inner,
+            topic.to_string(),
+            None, // consumer_group not used in browse mode
+            None, // consumer_id
+            InitialPosition::Earliest, // Always start from beginning
+            SubscriptionMode::Browse,
+            credits_window,
+        )
+        .await
+    }
+
+    /// Get statistics for topics.
+    ///
+    /// If `topics` is empty, returns stats for all topics.
+    /// Otherwise, returns stats only for the specified topics.
+    pub async fn get_topic_stats(&mut self, topics: Vec<String>) -> Result<Vec<TopicStats>> {
+        let resp = self
+            .inner
+            .get_topic_stats(GetTopicStatsRequest { topics })
+            .await
+            .context("get_topic_stats RPC failed")?
+            .into_inner();
+        Ok(resp.stats)
     }
 }

@@ -19,6 +19,10 @@ service Sluice {
   // Client sends: SubscribeRequest (init), then Credit/Ack messages.
   // Server sends: MessageDelivery.
   rpc Subscribe (stream SubscribeUpstream) returns (stream SubscribeDownstream);
+
+  // Unary GetTopicStats: Retrieve statistics for one or more topics.
+  // Returns message counts, sequence ranges, and consumer group info.
+  rpc GetTopicStats(GetTopicStatsRequest) returns (GetTopicStatsResponse) {}
 }
 
 message ListTopicsRequest {
@@ -103,17 +107,23 @@ message SubscribeUpstream {
 }
 
 message SubscriptionInit {
-  string          topic            = 1;
-  string          consumer_group   = 2; // "default" for MVP if not specified.
-  string          consumer_id      = 3; // Optional, for debugging/logging.
-  InitialPosition initial_position = 4;
-  uint64          offset           = 5; // Required when initial_position == OFFSET.
+  string           topic            = 1;
+  string           consumer_group   = 2; // "default" for MVP if not specified.
+  string           consumer_id      = 3; // Optional, for debugging/logging.
+  InitialPosition  initial_position = 4;
+  uint64           offset           = 5; // Required when initial_position == OFFSET.
+  SubscriptionMode mode             = 6; // Default: CONSUMER_GROUP.
 }
 
 enum InitialPosition {
   LATEST   = 0; // Start from new messages only.
   EARLIEST = 1; // Start from the oldest available message.
   OFFSET   = 2; // Start from a specific sequence number (uses offset field).
+}
+
+enum SubscriptionMode {
+  CONSUMER_GROUP = 0; // Default: respects cursor, updates on ack.
+  BROWSE         = 1; // Ignores cursor, never updates it. For debugging/inspection.
 }
 
 message CreditGrant {
@@ -150,4 +160,33 @@ message MessageDelivery {
   bytes               payload    = 3;
   map<string, string> attributes = 4;
   int64               timestamp  = 5;
+}
+
+// GetTopicStats messages
+
+message GetTopicStatsRequest {
+  // If empty, returns stats for all topics.
+  repeated string topics = 1;
+}
+
+message GetTopicStatsResponse {
+  repeated TopicStats stats = 1;
+}
+
+message TopicStats {
+  string topic = 1;
+  uint64 total_messages = 2;
+  uint64 first_sequence = 3;
+  uint64 last_sequence = 4;
+  int64 first_message_timestamp = 5;
+  int64 last_message_timestamp = 6;
+  int64 created_at = 7;
+  repeated ConsumerGroupStats consumer_groups = 8;
+}
+
+message ConsumerGroupStats {
+  string group_name = 1;
+  uint64 cursor_sequence = 2;
+  uint64 pending_count = 3;  // last_sequence - cursor_sequence
+  int64 last_ack_timestamp = 4;
 }

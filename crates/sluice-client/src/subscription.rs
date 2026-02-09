@@ -10,7 +10,7 @@ use tonic::Streaming;
 use sluice_proto::sluice::v1::sluice_client::SluiceClient as ProtoClient;
 use sluice_proto::sluice::v1::{
     subscribe_downstream, subscribe_upstream, Ack, CreditGrant, InitialPosition, MessageDelivery,
-    SubscribeDownstream, SubscribeUpstream, SubscriptionInit,
+    SubscribeDownstream, SubscribeUpstream, SubscriptionInit, SubscriptionMode,
 };
 
 /// Configures how credits are refilled.
@@ -102,6 +102,7 @@ impl Subscription {
         consumer_group: Option<String>,
         consumer_id: Option<String>,
         initial_position: InitialPosition,
+        mode: SubscriptionMode,
         credits_window: u32,
     ) -> Result<Self> {
         let credit_config = CreditConfig::with_window(credits_window);
@@ -111,6 +112,7 @@ impl Subscription {
             consumer_group,
             consumer_id,
             initial_position,
+            mode,
             credit_config,
         )
         .await
@@ -123,6 +125,7 @@ impl Subscription {
         consumer_group: Option<String>,
         consumer_id: Option<String>,
         initial_position: InitialPosition,
+        mode: SubscriptionMode,
         credit_config: CreditConfig,
     ) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<SubscribeUpstream>(32);
@@ -135,6 +138,7 @@ impl Subscription {
                 consumer_id: consumer_id.unwrap_or_default(),
                 initial_position: initial_position.into(),
                 offset: 0,
+                mode: mode.into(),
             })),
         };
         tx.send(init)

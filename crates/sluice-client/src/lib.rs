@@ -40,4 +40,7 @@ pub use connection::{ConnectConfig, RetryConfig, SluiceClient};
 pub use subscription::{AutoRefillSubscription, CreditConfig, RefillAmount, Subscription};
 
 // Re-export proto types that clients commonly use
-pub use sluice_proto::{InitialPosition, MessageDelivery, PublishResponse, Topic};
+pub use sluice_proto::{
+    ConsumerGroupStats, InitialPosition, MessageDelivery, PublishResponse, SubscriptionMode,
+    Topic, TopicStats,
+};
